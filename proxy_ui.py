@@ -18,15 +18,16 @@ import yaml
 APP_DIR = Path(__file__).resolve().parent
 if (APP_DIR / "litellm_config.yaml").exists() or not (APP_DIR / "dahl_litellm_config.yaml").exists():
     CONFIG_PATH = APP_DIR / "litellm_config.yaml"
-    BACKUP_PATH = APP_DIR / "litellm_config.yaml.bak"
 else:
     CONFIG_PATH = APP_DIR / "dahl_litellm_config.yaml"
+BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
 EXAMPLE_CONFIG_PATH = APP_DIR / "litellm_config.example.yaml"
 
 def ensure_config_exists():
     global CONFIG_PATH, BACKUP_PATH
     if not CONFIG_PATH.exists() and EXAMPLE_CONFIG_PATH.exists():
         shutil.copyfile(EXAMPLE_CONFIG_PATH, CONFIG_PATH)
+    BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
 
 ensure_config_exists()
 
@@ -175,12 +176,13 @@ def stop_proxy_process():
             time.sleep(1)
         except OSError:
             pass
-        # Force kill if still open
-        if is_port_open(4000):
-            try:
-                subprocess.run("lsof -ti :4000 | xargs kill -9 2>/dev/null", shell=True, timeout=2)
-            except Exception:
-                pass
+    # Force kill if still open
+    if is_port_open(4000):
+        try:
+            subprocess.run("lsof -ti :4000 | xargs kill -9 2>/dev/null", shell=True, timeout=3)
+            time.sleep(0.5)
+        except Exception:
+            pass
     time.sleep(0.5)
 
 
@@ -201,8 +203,8 @@ def start_proxy_process():
         cwd=str(APP_DIR),
         start_new_session=True
     )
-    # Give it up to 5 seconds to bind
-    for _ in range(10):
+    # Give it up to 8 seconds to bind
+    for _ in range(16):
         time.sleep(0.5)
         if is_port_open(4000):
             break
@@ -401,10 +403,9 @@ async def save_model(req: SaveModelRequest):
         if item.get("model_name") in ("default", "claude*", "claude-3-5-sonnet-20241022"):
             curr_p = item.get("litellm_params", {})
             curr_target = curr_p.get("model", "")
-            curr_base = (curr_p.get("api_base") or "").rstrip("/")
-            if (curr_base and curr_base == api_base) or \
-               (curr_target in (target_str, f"openai/{req.model_name}", req.model_name)) or \
-               (req.model_name in curr_target or curr_target in f"openai/{req.model_name}"):
+            if curr_target.startswith("openai/"):
+                curr_target = curr_target[len("openai/"):]
+            if curr_target in (raw_target, req.model_name) or target_str == curr_p.get("model", ""):
                 is_primary = True
             break
 
@@ -487,21 +488,23 @@ async def save_pipeline(req: SavePipelineRequest):
                 continue
             raw_target = m_def.get("target_model") or m_def.get("model") or m_name
             target_str = f"openai/{raw_target}" if not raw_target.startswith("openai/") else raw_target
+
+            sent_keys = [
+                k for k in (m_def.get("api_keys") or [])
+                if k and k not in ("configured", "(none)")
+            ]
+            single = m_def.get("api_key")
+            if single and single not in ("configured", "(none)") and single not in sent_keys:
+                sent_keys.insert(0, single)
+
             if m_name not in catalog:
                 catalog[m_name] = {
                     "model": target_str,
                     "api_base": m_def.get("api_base"),
-                    "api_key": m_def.get("api_key")
+                    "api_key": sent_keys[0] if sent_keys else (single or "")
                 }
+                catalog_keys[m_name] = sent_keys
             else:
-                # Retain disk credentials unless explicitly updated keys were sent
-                sent_keys = [
-                    k for k in (m_def.get("api_keys") or [])
-                    if k and k not in ("configured", "(none)")
-                ]
-                single = m_def.get("api_key")
-                if single and single not in ("configured", "(none)") and single not in sent_keys:
-                    sent_keys.insert(0, single)
                 if sent_keys:
                     catalog[m_name]["api_key"] = sent_keys[0]
                     catalog_keys[m_name] = sent_keys
@@ -702,19 +705,18 @@ async def test_provider(req: TestProviderRequest):
 @app.get("/api/logs")
 async def get_logs(lines: int = 80):
     candidates = [LOG_FILE, TMP_LOG_FILE]
-    
-    # Also look for any recent litellm logs in task logs
+    valid = [c for c in candidates if c.exists() and c.stat().st_size > 0]
+    valid.sort(key=lambda c: c.stat().st_mtime, reverse=True)
     content = []
-    for cand in candidates:
-        if cand.exists() and cand.stat().st_size > 0:
-            try:
-                with open(cand, "r", encoding="utf-8", errors="ignore") as f:
-                    all_lines = f.readlines()
-                    if all_lines:
-                        content = all_lines[-lines:]
-                        break
-            except Exception:
-                continue
+    for cand in valid:
+        try:
+            with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                all_lines = f.readlines()
+                if all_lines:
+                    content = all_lines[-lines:]
+                    break
+        except Exception:
+            continue
 
     return {"lines": [l.rstrip("\r\n") for l in content]}
 

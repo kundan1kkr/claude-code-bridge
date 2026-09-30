@@ -26,6 +26,10 @@ litellm_proxy.log
 .vscode/
 .idea/
 
+# Local convenience aliases
+run_claude_dahl.sh
+run_all.sh
+
 # Generated demo assets
 generated_*.png
 generated_image.png

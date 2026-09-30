@@ -1790,18 +1790,24 @@ body {
 .modal-backdrop {
   position: fixed;
   inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100vw;
+  height: 100vh;
   background: rgba(0, 0, 0, 0.65);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 9999;
   padding: 1rem;
 }
 
 .modal-backdrop.active {
-  display: flex;
+  display: flex !important;
   animation: backdrop-in 0.15s var(--ease);
 }
 
@@ -1819,6 +1825,10 @@ body {
   padding: 1.5rem;
   box-shadow: var(--shadow-lg);
   animation: modal-in 0.2s var(--ease);
+  position: relative;
+  z-index: 10000;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
 }
 
 @keyframes modal-in {

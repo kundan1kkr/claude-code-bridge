@@ -2077,3 +2077,63 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+
+/* --- API key rotation group ------------------------------------------- */
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.key-row .key-rank {
+  flex: 0 0 1.5rem;
+  height: 1.5rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.key-row .form-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-add-key {
+  margin-top: 0.2rem;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.form-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.key-count {
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.6rem;
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}

@@ -53,6 +53,9 @@ model_list:
   # C. SAMPLE CUSTOM PROVIDERS & BACKUP MODELS
   # Add your favorite OpenAI-compatible models here for automatic failovers
   # ---------------------------------------------------------------------------
+  # Several entries sharing ONE model_name = a key rotation group. Every key in
+  # the group is tried (highest weight first) before the next provider in the
+  # fallback chain. Add more keys here, or in the dashboard via "+ Add another key".
   - model_name: "deepseek-chat"
     litellm_params:
       model: "openai/deepseek-chat"

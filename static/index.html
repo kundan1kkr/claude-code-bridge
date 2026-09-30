@@ -19,7 +19,7 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=2.2">
 </head>
 
 <body>
@@ -243,7 +243,15 @@
             </p>
           </div>
           <div class="header-actions" style="display: flex; gap: 0.6rem;">
-            <button id="btn-save-pipeline" class="btn btn-primary" onclick="savePipelineChanges()">
+            <button class="btn btn-secondary btn-sm" onclick="openAddModelModal()" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Add Custom Model
+            </button>
+            <button id="btn-save-pipeline" class="btn btn-primary" onclick="savePipelineChanges()" type="button">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                 stroke-linejoin="round">
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
@@ -705,8 +713,8 @@ claude</code>
         <div id="modal-test-result" style="margin-top: 0.5rem; font-size: 0.8rem; font-family: var(--font-mono);"></div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="testModalModel()">Test Connection</button>
-        <button class="btn btn-primary" onclick="saveModalModel()">Save to Catalog</button>
+        <button class="btn btn-secondary" onclick="testModalModel()" type="button">Test Connection</button>
+        <button class="btn btn-primary" onclick="saveModalModel()" type="button">Save to Catalog</button>
       </div>
     </div>
   </div>
@@ -734,7 +742,7 @@ claude</code>
   <!-- Toast Container -->
   <div id="toast-container" class="toast-container"></div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=2.2"></script>
 
 </body>
 

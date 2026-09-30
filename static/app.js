@@ -23,6 +23,17 @@ const ICONS = {
   grip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01"/></svg>'
 };
 
+function apiFetch(url, options = {}) {
+  const opts = { ...options };
+  opts.headers = { ...(opts.headers || {}) };
+  if (!opts.method || opts.method.toUpperCase() === 'GET') {
+    opts.cache = 'no-store';
+    const sep = url.includes('?') ? '&' : '?';
+    url = `${url}${sep}_t=${Date.now()}`;
+  }
+  return fetch(url, opts);
+}
+
 let appState = {
   status: null,
   config: null,
@@ -54,6 +65,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('confirm-modal').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) resolveConfirm(false);
   });
+
+  const modelModal = document.getElementById('model-modal');
+  if (modelModal) {
+    modelModal.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) closeModelModal();
+    });
+  }
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
@@ -179,7 +197,7 @@ function showToast(message, type = 'success') {
    -------------------------------------------------------------------------- */
 async function fetchStatus() {
   try {
-    const res = await fetch('/api/status');
+    const res = await apiFetch('/api/status');
     const data = await res.json();
     appState.status = data;
 
@@ -220,7 +238,7 @@ async function handleProxyAction(action) {
 
   showToast(`Executing proxy ${action}...`, 'success');
   try {
-    const res = await fetch('/api/proxy/action', {
+    const res = await apiFetch('/api/proxy/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action })
@@ -240,7 +258,7 @@ async function handleProxyAction(action) {
    -------------------------------------------------------------------------- */
 async function loadConfig() {
   try {
-    const res = await fetch('/api/config');
+    const res = await apiFetch('/api/config');
     const data = await res.json();
     appState.config = data;
     appState.pipeline = [...data.pipeline];
@@ -271,7 +289,7 @@ async function loadExampleTemplate() {
   if (!confirmed) return;
 
   try {
-    const res = await fetch('/api/config/example');
+    const res = await apiFetch('/api/config/example');
     if (!res.ok) {
       throw new Error(`Server returned ${res.status}`);
     }
@@ -644,7 +662,7 @@ async function savePipelineChanges() {
   setSaveState('pipeline', true);
   try {
     showToast('Saving pipeline & updating fallback router...', 'success');
-    const res = await fetch('/api/config/pipeline', {
+    const res = await apiFetch('/api/config/pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -935,7 +953,7 @@ async function pingAllPipelineModels() {
 
 async function runPing(model, api_base, api_key) {
   try {
-    const res = await fetch('/api/test-provider', {
+    const res = await apiFetch('/api/test-provider', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, api_base, api_key })
@@ -1068,7 +1086,7 @@ async function saveModalModel() {
   saveState.model = true;
 
   try {
-    const res = await fetch('/api/config/model', {
+    const res = await apiFetch('/api/config/model', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1116,7 +1134,7 @@ async function saveRawYaml() {
       saveBtn.innerHTML = '<span class="btn-spinner"></span> Saving...';
     }
     showToast('Validating & saving raw YAML...', 'success');
-    const res = await fetch('/api/config/raw', {
+    const res = await apiFetch('/api/config/raw', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ yaml_content: content, restart_proxy: true })
@@ -1234,7 +1252,7 @@ function updateLiveServed(lines) {
 
 async function loadLogs() {
   try {
-    const res = await fetch('/api/logs?lines=80');
+    const res = await apiFetch('/api/logs?lines=80');
     const data = await res.json();
     const container = document.getElementById('log-container');
 

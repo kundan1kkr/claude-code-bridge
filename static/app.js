@@ -820,7 +820,7 @@ function renderCatalog() {
         <span><b>Provider:</b> ${escapeHtml(provider)}</span>
         <span><b>Endpoint:</b> ${escapeHtml(data.api_base)}</span>
         <span><b>Target Model:</b> ${escapeHtml(data.target_model || name)}</span>
-        <span><b>API Key:</b> ${maskKey(data.api_key)}</span>
+        <span><b>API Key:</b> ${maskKey(data.api_key)}${keyCountLabel(data)}</span>
       </div>
 
       <div class="catalog-footer">
@@ -954,10 +954,63 @@ function openAddModelModal() {
   document.getElementById('modal-model-name').value = '';
   document.getElementById('modal-model-name').disabled = false;
   document.getElementById('modal-api-base').value = '';
-  document.getElementById('modal-api-key').value = '';
+  renderKeyRows(['']);
   document.getElementById('modal-target-model').value = '';
   document.getElementById('modal-test-result').innerHTML = '';
   document.getElementById('model-modal').classList.add('active');
+}
+
+/* ---------------------------------------------------------------------------
+   API key rotation group
+   A model can hold several keys. They render as an ordered list; the proxy
+   tries them in this order before falling through to the next provider.
+--------------------------------------------------------------------------- */
+
+function renderKeyRows(keys) {
+  const list = document.getElementById('modal-key-list');
+  if (!list) return;
+  const values = (keys && keys.length) ? keys : [''];
+  list.innerHTML = values.map((key, i) => `
+    <div class="key-row" data-index="${i}">
+      <span class="key-rank" title="Priority ${i + 1}">${i + 1}</span>
+      <input type="text" class="form-input modal-key-input" value="${escapeHtml(key)}"
+        placeholder="${i === 0 ? 'sk-... or dummy key for local' : 'backup key for the same model'}">
+      <button class="icon-btn" type="button" onclick="copyKeyRow(${i})"
+        title="Copy this key" aria-label="Copy this key">${ICONS.copy || 'copy'}</button>
+      <button class="icon-btn danger" type="button" onclick="removeKeyRow(${i})"
+        title="Remove this key" aria-label="Remove this key"
+        ${values.length === 1 ? 'disabled' : ''}>&times;</button>
+    </div>
+  `).join('');
+}
+
+function getKeyRows() {
+  return Array.from(document.querySelectorAll('.modal-key-input'))
+    .map(el => el.value.trim());
+}
+
+function addKeyRow() {
+  const keys = getKeyRows();
+  keys.push('');
+  renderKeyRows(keys);
+  const inputs = document.querySelectorAll('.modal-key-input');
+  if (inputs.length) inputs[inputs.length - 1].focus();
+}
+
+function removeKeyRow(index) {
+  const keys = getKeyRows();
+  if (keys.length <= 1) return;
+  keys.splice(index, 1);
+  renderKeyRows(keys);
+}
+
+async function copyKeyRow(index) {
+  const keys = getKeyRows();
+  if (!keys[index]) {
+    showToast('No API key to copy', 'error');
+    return;
+  }
+  await copyToClipboard(keys[index], null);
 }
 
 function openEditModelModal(name) {
@@ -968,7 +1021,7 @@ function openEditModelModal(name) {
   document.getElementById('modal-model-name').value = name;
   document.getElementById('modal-model-name').disabled = true;
   document.getElementById('modal-api-base').value = data.api_base || '';
-  document.getElementById('modal-api-key').value = data.api_key || '';
+  renderKeyRows(data.api_keys && data.api_keys.length ? data.api_keys : [data.api_key || '']);
   document.getElementById('modal-target-model').value = data.target_model || name;
   document.getElementById('modal-test-result').innerHTML = '';
   document.getElementById('model-modal').classList.add('active');
@@ -978,22 +1031,13 @@ function closeModelModal() {
   document.getElementById('model-modal').classList.remove('active');
 }
 
-async function copyApiKeyFromModal() {
-  const key = document.getElementById('modal-api-key').value;
-  if (!key) {
-    showToast('No API key to copy', 'error');
-    return;
-  }
-  await copyToClipboard(key, null);
-}
-
 async function testModalModel() {
   const resultDiv = document.getElementById('modal-test-result');
   resultDiv.innerHTML = '<span style="color: var(--text-muted);">Testing connection...</span>';
 
   const model = document.getElementById('modal-target-model').value || document.getElementById('modal-model-name').value;
   const api_base = document.getElementById('modal-api-base').value;
-  const api_key = document.getElementById('modal-api-key').value;
+  const api_key = getKeyRows().find(k => k) || '';
 
   const res = await runPing(model, api_base, api_key);
   if (res.success) {
@@ -1007,7 +1051,8 @@ async function saveModalModel() {
   if (saveState.model) return;
   const name = document.getElementById('modal-model-name').value.trim();
   const api_base = document.getElementById('modal-api-base').value.trim();
-  const api_key = document.getElementById('modal-api-key').value.trim();
+  const api_keys = getKeyRows().filter(k => k);
+  const api_key = api_keys[0] || '';
   const target_model = document.getElementById('modal-target-model').value.trim() || name;
 
   if (!name || !api_base) {
@@ -1031,6 +1076,7 @@ async function saveModalModel() {
         target_model: target_model,
         api_base: api_base,
         api_key: api_key,
+        api_keys: api_keys,
         restart_proxy: true
       })
     });
@@ -1255,6 +1301,12 @@ function escapeHtml(str) {
     "'": '&' + '#039;'
   };
   return String(str).replace(/[&<>"']/g, (ch) => map[ch]);
+}
+
+function keyCountLabel(data) {
+  const n = (data.api_keys || []).length;
+  if (n <= 1) return '';
+  return ` <span class="key-count" title="${n} keys tried in order before falling back">+${n - 1} backup</span>`;
 }
 
 function maskKey(key) {

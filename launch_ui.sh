@@ -3,6 +3,7 @@
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON_BIN="$DIR/.venv_litellm/bin/python"
+[ -f "$PYTHON_BIN" ] || PYTHON_BIN="python3"
 PORT=4001
 
 echo "========================================================"

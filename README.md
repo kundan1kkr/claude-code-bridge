@@ -18,6 +18,7 @@ cd claude-code-bridge
 Open **`http://localhost:4001`**:
 * **Catalog Tab**: Enter your provider API keys and base URLs (DeepSeek, OpenRouter, Groq, Ollama, etc.).
 * **Pipeline Tab**: Order your models with ▲ / ▼ buttons to set your primary route and automatic fallbacks.
+* **Multiple API keys per model**: stack several keys on one model; all of them are tried before the next provider is used (see below).
 * Click **"Save & Reload Proxy"**.
 
 ### 3. Launch Claude Code CLI
@@ -68,3 +69,51 @@ When Claude Desktop or Claude Code makes a request:
 - **CLI Model Monitor**: `./which_model.sh --live`
 - **Claude Launcher**: `./run_claude.sh`
 - **Service Controller**: `./start_all.sh` (`start` | `stop` | `restart` | `status`)
+
+---
+
+## 🔑 Multiple API Keys per Model
+
+Free tiers rate-limit fast, so you can stack several keys on one model and burn
+through them before giving up on that provider. Failover then happens on two
+levels: **keys within a model**, then **models within the pipeline**.
+
+```
+claude-3-5-sonnet  →  groq-llama-3.3-70b   key #1  ✗ 429
+                                           key #2  ✗ 429
+                                           key #3  ✗ 429
+                   →  deepseek-chat        key #1  ✓ 200
+```
+
+**In the dashboard**: open a model in the catalog and use **+ Add another key**.
+Keys are tried top to bottom; the `×` button removes one. Catalog cards show a
+`+N backup` marker for models that have a key group.
+
+**In YAML**, a key group is just several `model_list` entries sharing one
+`model_name`:
+
+```yaml
+- model_name: deepseek-chat
+  litellm_params:
+    model: openai/deepseek-chat
+    api_base: https://api.deepseek.com/v1
+    api_key: sk-key-one
+    weight: 2          # higher weight = tried first
+- model_name: deepseek-chat
+  litellm_params:
+    model: openai/deepseek-chat
+    api_base: https://api.deepseek.com/v1
+    api_key: sk-key-two
+    weight: 1
+```
+
+Two router settings make this reliable, and the dashboard maintains both:
+
+- `num_retries` is kept `>=` your largest key group, so a fallback can never fire
+  while some of that model's keys are still untried.
+- `allowed_fails: 0` cools a key down after its first failure, so the retry lands
+  on the *next* key instead of re-rolling onto the same dead one.
+
+Keys are tried in order on a healthy router. Ordering is a strong preference
+rather than a hard guarantee — LiteLLM's shuffle may repeat a key once the group
+is cooling down — but the group is always exhausted before the next provider.

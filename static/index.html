@@ -687,18 +687,16 @@ claude</code>
           <input type="text" id="modal-api-base" class="form-input" placeholder="e.g. https://api.apmix.ai/v1">
         </div>
         <div class="form-group">
-          <label class="form-label" for="modal-api-key">API Key</label>
-          <div style="display: flex; gap: 0.4rem;">
-            <input type="text" id="modal-api-key" class="form-input" placeholder="sk-... or dummy key for local">
-            <button class="icon-btn" onclick="copyApiKeyFromModal()" title="Copy API key to clipboard"
-              aria-label="Copy API key">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                stroke-linejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
-            </button>
-          </div>
+          <label class="form-label">API Keys</label>
+          <div id="modal-key-list"></div>
+          <button class="btn btn-secondary btn-add-key" onclick="addKeyRow()" type="button">
+            + Add another key
+          </button>
+          <p class="form-hint">
+            Keys are tried top to bottom. If key #1 is rate-limited or errors, the proxy
+            retries the same model with the next key, and only moves to the next provider
+            in the pipeline once every key here has failed. Key #1 is tried first.
+          </p>
         </div>
         <div class="form-group">
           <label class="form-label" for="modal-target-model">Target Model ID (OpenAI format)</label>

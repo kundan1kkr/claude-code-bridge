@@ -50,6 +50,73 @@ CLAUDE_ALIASES = [
     "claude-sonnet-4-6-alias"
 ]
 
+def _strip_openai(name: str) -> str:
+    """Strip the 'openai/' routing prefix LiteLLM uses for OpenAI-compatible hosts."""
+    return name[len("openai/"):] if name.startswith("openai/") else name
+
+
+def _normalize_keys(single, multi):
+    """Merge the legacy single api_key field and the api_keys list into one ordered,
+    de-duplicated list. Order is preserved: the first entry is the highest priority."""
+    candidates = list(multi) if multi else []
+    if single:
+        candidates.insert(0, single)
+    seen = set()
+    keys = []
+    for k in candidates:
+        k = (k or "").strip()
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+    return keys or [""]
+
+
+def build_deployments(model_name, target, api_base, keys):
+    """One model_list entry per API key, all sharing the same model_name.
+
+    LiteLLM treats same-named entries as a single deployment group and retries
+    across every deployment in the group before any fallback model is tried, so
+    this is what makes "use all my keys for this model first" work. `weight`
+    biases simple-shuffle toward the earlier keys, so key #1 is preferred while
+    the later ones stay available as automatic retries.
+    """
+    total = len(keys)
+    deployments = []
+    for i, key in enumerate(keys):
+        params = {"model": target, "api_base": api_base, "api_key": key}
+        if total > 1:
+            params["weight"] = total - i
+        deployments.append({"model_name": model_name, "litellm_params": params})
+    return deployments
+
+
+def apply_router_defaults(data):
+    """Router/LiteLLM settings. num_retries must be at least as large as the
+    biggest key group, or LiteLLM would fall through to the next provider while
+    some of this model's keys had not been tried yet."""
+    counts = {}
+    for item in data.get("model_list", []):
+        name = item.get("model_name")
+        if name and name not in set(CLAUDE_ALIASES):
+            counts[name] = counts.get(name, 0) + 1
+    max_group = max(counts.values()) if counts else 1
+
+    router = data.setdefault("router_settings", {})
+    router["routing_strategy"] = "simple-shuffle"
+    router["num_retries"] = max(3, max_group + 1)
+    router["cooldown_time"] = 10
+    # 0 = cool a deployment down after its FIRST failure. This is what makes a
+    # retry move on to the next key in the group instead of re-rolling the shuffle
+    # and hitting the same dead key again, so every key gets tried before the
+    # fallback provider is reached.
+    router["allowed_fails"] = 0
+
+    settings = data.setdefault("litellm_settings", {})
+    settings["drop_params"] = True
+    settings["request_timeout"] = 90
+    settings["use_chat_completions_url_for_anthropic_messages"] = True
+
+
 app = FastAPI(title="Claude Proxy Bridge Manager", version="1.0.0")
 
 # Mount static files
@@ -273,13 +340,19 @@ async def get_config():
             raw_model = params.get("model", "")
             if raw_model.startswith("openai/"):
                 raw_model = raw_model[len("openai/"):]
+            entry_key = params.get("api_key", "") or ""
             if m_name not in catalog:
                 catalog[m_name] = {
                     "model_name": m_name,
                     "target_model": raw_model,
                     "api_base": params.get("api_base", ""),
-                    "api_key": params.get("api_key", ""),
+                    "api_key": entry_key,
+                    # Several model_list entries may share one model_name — that
+                    # is a key rotation group, so gather all of their keys.
+                    "api_keys": [entry_key] if entry_key else [],
                 }
+            elif entry_key and entry_key not in catalog[m_name]["api_keys"]:
+                catalog[m_name]["api_keys"].append(entry_key)
 
     return {
         "raw_yaml": raw_text,
@@ -294,7 +367,10 @@ class SaveModelRequest(BaseModel):
     model_name: str
     target_model: Optional[str] = None
     api_base: str
-    api_key: str
+    api_key: str = ""
+    # Ordered rotation group. LiteLLM tries every key here before falling back
+    # to the next provider in the pipeline.
+    api_keys: Optional[List[str]] = None
     restart_proxy: bool = True
 
 
@@ -317,54 +393,50 @@ async def save_model(req: SaveModelRequest):
     target_str = f"openai/{raw_target}" if not raw_target.startswith("openai/") else raw_target
 
     claude_aliases = set(CLAUDE_ALIASES)
+    keys = _normalize_keys(req.api_key, req.api_keys)
 
-    # Determine if this model or its endpoint is the active primary for Claude aliases
+    # Is this model currently what the Claude aliases route to?
     is_primary = False
     for item in model_list:
         if item.get("model_name") in ("default", "claude*", "claude-3-5-sonnet-20241022"):
             curr_p = item.get("litellm_params", {})
             curr_target = curr_p.get("model", "")
-            curr_base = curr_p.get("api_base", "").rstrip("/")
+            curr_base = (curr_p.get("api_base") or "").rstrip("/")
             if (curr_base and curr_base == api_base) or \
                (curr_target in (target_str, f"openai/{req.model_name}", req.model_name)) or \
                (req.model_name in curr_target or curr_target in f"openai/{req.model_name}"):
                 is_primary = True
             break
 
-    updated = False
+    # Rebuild the list: drop every existing deployment of this model_name (the
+    # whole key group) and re-emit it from `keys`. Entries for OTHER models are
+    # left alone — editing one model must never rewrite another model's keys.
+    deployments = build_deployments(req.model_name, target_str, api_base, keys)
+    rebuilt = []
+    inserted = False
     for item in model_list:
         m_name = item.get("model_name", "")
-        p = item.setdefault("litellm_params", {})
-        item_base = p.get("api_base", "").rstrip("/")
+        if m_name == req.model_name:
+            if not inserted:
+                rebuilt.extend(deployments)
+                inserted = True
+            continue
+        if m_name in claude_aliases and is_primary:
+            # Aliases follow the primary, and get the same rotation group.
+            continue
+        rebuilt.append(item)
 
-        if m_name in claude_aliases:
-            if is_primary:
-                p["api_base"] = api_base
-                p["api_key"] = req.api_key
-                p["model"] = target_str
-        else:
-            matches_name = (m_name == req.model_name)
-            matches_provider = bool(item_base and item_base == api_base)
-            matches_variant = bool(req.model_name in m_name or m_name in req.model_name)
+    if is_primary:
+        alias_entries = []
+        for alias in CLAUDE_ALIASES:
+            alias_entries.extend(build_deployments(alias, target_str, api_base, keys))
+        rebuilt = alias_entries + rebuilt
 
-            if matches_name:
-                p["api_base"] = api_base
-                p["api_key"] = req.api_key
-                p["model"] = target_str
-                updated = True
-            elif matches_provider or matches_variant:
-                p["api_base"] = api_base
-                p["api_key"] = req.api_key
+    if not inserted:
+        rebuilt.extend(deployments)
 
-    if not updated:
-        model_list.append({
-            "model_name": req.model_name,
-            "litellm_params": {
-                "model": target_str,
-                "api_base": req.api_base,
-                "api_key": req.api_key
-            }
-        })
+    data["model_list"] = rebuilt
+    apply_router_defaults(data)
 
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(data, f, sort_keys=False, indent=2)
@@ -396,10 +468,18 @@ async def save_pipeline(req: SavePipelineRequest):
 
     # If new model definitions were provided in request, merge them into catalog
     catalog = {}
+    catalog_keys = {}
     for item in model_list:
         m_name = item.get("model_name")
         if m_name and m_name not in claude_aliases:
-            catalog[m_name] = dict(item.get("litellm_params", {}))
+            params = dict(item.get("litellm_params", {}))
+            entry_key = params.get("api_key") or ""
+            if m_name not in catalog:
+                catalog[m_name] = params
+                catalog_keys[m_name] = [entry_key] if entry_key else []
+            elif entry_key and entry_key not in catalog_keys[m_name]:
+                # Another deployment of the same model = another key in its group
+                catalog_keys[m_name].append(entry_key)
 
     if req.models:
         for m_name, m_def in req.models.items():
@@ -414,9 +494,17 @@ async def save_pipeline(req: SavePipelineRequest):
                     "api_key": m_def.get("api_key")
                 }
             else:
-                # Retain disk credentials unless an explicitly updated new key was sent
-                if m_def.get("api_key") and m_def.get("api_key") not in ("configured", "(none)"):
-                    catalog[m_name]["api_key"] = m_def.get("api_key")
+                # Retain disk credentials unless explicitly updated keys were sent
+                sent_keys = [
+                    k for k in (m_def.get("api_keys") or [])
+                    if k and k not in ("configured", "(none)")
+                ]
+                single = m_def.get("api_key")
+                if single and single not in ("configured", "(none)") and single not in sent_keys:
+                    sent_keys.insert(0, single)
+                if sent_keys:
+                    catalog[m_name]["api_key"] = sent_keys[0]
+                    catalog_keys[m_name] = sent_keys
                 if m_def.get("api_base"):
                     catalog[m_name]["api_base"] = m_def.get("api_base")
 
@@ -459,23 +547,32 @@ async def save_pipeline(req: SavePipelineRequest):
     # Rebuild model_list:
     # 1. Claude aliases pointing to the new primary route
     new_model_list = []
+    # The primary may have been resolved by fuzzy match, so find which catalog
+    # entry primary_params actually came from to pick up its whole key group.
+    primary_group = catalog_keys.get(primary_id)
+    if primary_group is None:
+        for c_name, c_params in catalog.items():
+            if c_params is primary_params:
+                primary_group = catalog_keys.get(c_name)
+                break
+    primary_keys = _normalize_keys(primary_params.get("api_key"), primary_group)
     for alias in claude_aliases:
-        new_model_list.append({
-            "model_name": alias,
-            "litellm_params": {
-                "model": primary_params.get("model"),
-                "api_base": primary_params.get("api_base"),
-                "api_key": primary_params.get("api_key")
-            }
-        })
+        new_model_list.extend(build_deployments(
+            alias,
+            primary_params.get("model"),
+            primary_params.get("api_base"),
+            primary_keys,
+        ))
 
     # 2. Add all catalog entries permanently (NEVER DELETE ANY MODEL)
     for m_name, params in catalog.items():
         if m_name not in claude_aliases:
-            new_model_list.append({
-                "model_name": m_name,
-                "litellm_params": params
-            })
+            new_model_list.extend(build_deployments(
+                m_name,
+                params.get("model"),
+                params.get("api_base"),
+                _normalize_keys(params.get("api_key"), catalog_keys.get(m_name)),
+            ))
 
     # 3. Build cascading fallbacks
     fallbacks_list = []
@@ -493,16 +590,7 @@ async def save_pipeline(req: SavePipelineRequest):
     if "router_settings" not in data:
         data["router_settings"] = {}
     data["router_settings"]["fallbacks"] = fallbacks_list
-    data["router_settings"]["routing_strategy"] = "simple-shuffle"
-    data["router_settings"]["num_retries"] = 3
-    data["router_settings"]["cooldown_time"] = 10
-    data["router_settings"]["allowed_fails"] = 1
-
-    if "litellm_settings" not in data:
-        data["litellm_settings"] = {}
-    data["litellm_settings"]["drop_params"] = True
-    data["litellm_settings"]["request_timeout"] = 90
-    data["litellm_settings"]["use_chat_completions_url_for_anthropic_messages"] = True
+    apply_router_defaults(data)
 
     # Save to file
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -616,11 +704,6 @@ async def get_logs(lines: int = 80):
     candidates = [LOG_FILE, TMP_LOG_FILE]
     
     # Also look for any recent litellm logs in task logs
-    task_dir = Path("/Users/kundankumar/.gemini/antigravity-ide/brain/38062407-c496-409f-bb78-5e01e983931a/.system_generated/tasks")
-    if task_dir.exists():
-        task_logs = sorted(task_dir.glob("task-*.log"), key=os.path.getmtime, reverse=True)
-        candidates.extend(task_logs)
-
     content = []
     for cand in candidates:
         if cand.exists() and cand.stat().st_size > 0:
@@ -648,5 +731,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    print("Starting Claude Proxy Bridge UI on http://localhost:4001")
-    uvicorn.run(app, host="0.0.0.0", port=4001, log_level="info")
+
+    # Bind to loopback by default: the dashboard exposes provider API keys.
+    # Override with UI_HOST=0.0.0.0 only on a network you trust.
+    host = os.environ.get("UI_HOST", "127.0.0.1")
+    port = int(os.environ.get("UI_PORT", "4001"))
+    print(f"Starting Claude Proxy Bridge UI on http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="info")

@@ -1,0 +1,31 @@
+# Local configurations with active credentials (DO NOT COMMIT)
+litellm_config.yaml
+litellm_config.yaml.bak
+dahl_litellm_config.yaml
+dahl_litellm_config.yaml.bak
+*.local.yaml
+.env
+.env.*
+
+# Python Virtual Environments & Bytecode
+.venv*/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+litellm_proxy.log
+
+# Temporary and Backup Files
+*.bak
+*.tmp
+.DS_Store
+
+# IDE configuration
+.vscode/
+.idea/
+
+# Generated demo assets
+generated_*.png
+generated_image.png

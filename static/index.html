@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Proxy Bridge | Manager Dashboard</title>
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem('cpb-theme') === 'light') {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      } catch (e) { }
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="logo-group">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
+        </svg>
+      </div>
+      <div>
+        <div class="logo-title">Claude Proxy Bridge</div>
+        <div class="logo-subtitle">Self-Hosted Translation Gateway</div>
+      </div>
+      <span class="logo-badge">Port 4000</span>
+    </div>
+
+    <div class="header-controls">
+      <!-- Status Pill -->
+      <div id="proxy-status-pill" class="status-pill stopped">
+        <span class="pulse-dot"></span>
+        <span id="proxy-status-text">Checking...</span>
+      </div>
+
+      <!-- Controls -->
+      <button id="btn-start-proxy" class="btn btn-success btn-sm" onclick="handleProxyAction('start')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        </svg>
+        Start
+      </button>
+      <button id="btn-restart-proxy" class="btn btn-secondary btn-sm" onclick="handleProxyAction('restart')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <polyline points="1 4 1 10 7 10"></polyline>
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+        </svg>
+        Restart
+      </button>
+      <button id="btn-stop-proxy" class="btn btn-danger btn-sm" onclick="handleProxyAction('stop')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <rect x="6" y="6" width="12" height="12" rx="1"></rect>
+        </svg>
+        Stop
+      </button>
+
+      <!-- Live auto-refresh switch -->
+      <label class="switch">
+        <input type="checkbox" id="auto-refresh-toggle" checked onchange="toggleAutoRefresh(this.checked)">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+      </label>
+      <label class="switch-label" for="auto-refresh-toggle">Live</label>
+
+      <!-- Theme toggle -->
+      <button id="theme-toggle" class="theme-toggle" onclick="toggleTheme()" title="Toggle light / dark theme"
+        aria-label="Toggle theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Hero Quick Bar / Active Route & Agent Launcher -->
+  <div class="hero-quick-bar">
+    <div class="hero-left">
+      <div class="hero-label">Active Primary</div>
+      <div class="hero-model-badge" id="hero-active-model">
+        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+        </svg>
+        <span id="hero-model-name">Loading...</span>
+        <span id="hero-provider-tag" class="hero-provider-pill">...</span>
+      </div>
+      <select id="hero-quick-select" class="hero-select" onchange="applyQuickSwitchFromSelect(this.value)"
+        title="Quick Switch Primary Model">
+        <!-- Populated dynamically -->
+      </select>
+      <div id="hero-fallback-chain" class="hero-fallback-chain" style="display: none;">
+        <span class="hero-label">Fallback</span>
+        <span id="hero-fallback-text"></span>
+      </div>
+    </div>
+
+    <div class="hero-center">
+      <!-- Live Last Served Request Badge -->
+      <div class="hero-live-served" id="hero-live-served"
+        title="The exact model that processed the most recent request">
+        <span class="pulse-dot-green"></span>
+        <span class="served-label">LAST SERVED:</span>
+        <span id="live-served-model" class="served-model">Checking...</span>
+        <span id="live-served-meta" class="served-meta"></span>
+      </div>
+
+      <div class="hero-tool-badge" id="hero-tool-badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path
+            d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z">
+          </path>
+        </svg>
+        <span id="hero-tool-badge-text">Tool Calling Verified</span>
+      </div>
+      <div class="plan-mode-tip" title="Claude Code keyboard shortcut">
+        <span class="kbd">Shift</span> + <span class="kbd">Tab</span> toggles Plan / Auto Mode
+      </div>
+    </div>
+
+    <div class="hero-right">
+      <div class="hero-cmd-box" title="Click to copy agent launch command">
+        <span class="hero-cmd-text">./run_claude.sh --dangerously-skip-permissions</span>
+        <button class="hero-copy-btn" onclick="copySetupSnippet('agent', this)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Navigation Tabs (segmented control) -->
+  <div class="tabs-container">
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('tab-pipeline', this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <circle cx="12" cy="12" r="6"></circle>
+          <circle cx="12" cy="12" r="2"></circle>
+        </svg>
+        Fallback Pipeline
+      </button>
+      <button class="tab-btn" onclick="switchTab('tab-catalog', this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path
+            d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z">
+          </path>
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+          <line x1="12" y1="22.08" x2="12" y2="12"></line>
+        </svg>
+        Model Catalog
+      </button>
+      <button class="tab-btn" onclick="switchTab('tab-claude', this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <polyline points="4 17 10 11 4 5"></polyline>
+          <line x1="12" y1="19" x2="20" y2="19"></line>
+        </svg>
+        Client Setup
+      </button>
+      <button class="tab-btn" onclick="switchTab('tab-yaml', this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+        </svg>
+        Raw YAML
+      </button>
+      <button class="tab-btn" onclick="switchTab('tab-logs', this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <line x1="8" y1="6" x2="21" y2="6"></line>
+          <line x1="8" y1="12" x2="21" y2="12"></line>
+          <line x1="8" y1="18" x2="21" y2="18"></line>
+          <line x1="3" y1="6" x2="3.01" y2="6"></line>
+          <line x1="3" y1="12" x2="3.01" y2="12"></line>
+          <line x1="3" y1="18" x2="3.01" y2="18"></line>
+        </svg>
+        Live Logs
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Container -->
+  <main class="main-container">
+
+    <!-- Tab 1: Fallback Pipeline -->
+    <section id="tab-pipeline" class="tab-content active">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <path
+                  d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91 0z">
+                </path>
+                <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z">
+                </path>
+                <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"></path>
+                <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"></path>
+              </svg>
+              Active Fallback Hierarchy
+            </h2>
+            <p class="card-subtitle">
+              Requests from Claude Desktop & Claude Code first hit <b>Priority #1 (Primary)</b>. If rate-limited
+              or unavailable, traffic cascades down this chain. Drag rows to reorder.
+            </p>
+          </div>
+          <div class="header-actions" style="display: flex; gap: 0.6rem;">
+            <button id="btn-save-pipeline" class="btn btn-primary" onclick="savePipelineChanges()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                <polyline points="7 3 7 8 15 8"></polyline>
+              </svg>
+              Save & Reload Proxy
+            </button>
+          </div>
+        </div>
+
+        <div id="pipeline-list" class="pipeline-list">
+          <!-- Populated dynamically -->
+        </div>
+
+        <div class="catalog-protection-pill" style="margin-top: 0.85rem;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          </svg>
+          Safe Catalog: models are never deleted &mdash; browse all providers in the Model Catalog tab
+        </div>
+      </div>
+
+      <!-- Quick Diagnostics -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h3 class="card-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
+              </svg>
+              Quick Diagnostics
+            </h3>
+            <p class="card-subtitle">Test connection response times for all models in your active pipeline</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="pingAllPipelineModels()">
+            Test All In Pipeline
+          </button>
+        </div>
+        <div id="quick-diagnostics-results" style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+          <span class="card-subtitle">Click "Test All In Pipeline" to check live latency of all targets.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 2: Model Catalog -->
+    <section id="tab-catalog" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <path
+                  d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z">
+                </path>
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                <line x1="12" y1="22.08" x2="12" y2="12"></line>
+              </svg>
+              Complete Model Catalog
+              <span id="catalog-count-badge" class="count-badge">Loading...</span>
+            </h2>
+            <p class="card-subtitle">
+              Every provider and model is permanently retained. Promote any model to <b>#1 Primary Route</b> with one
+              click.
+            </p>
+          </div>
+          <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-primary btn-sm" onclick="openAddModelModal()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Add Custom Model
+            </button>
+          </div>
+        </div>
+
+        <!-- Search & Filter Toolbar -->
+        <div class="catalog-toolbar">
+          <div class="search-input-wrapper">
+            <span class="search-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+            </span>
+            <input type="text" id="catalog-search-input" class="search-input"
+              placeholder="Search by model or provider name..." oninput="handleCatalogSearch(this.value)">
+            <button class="clear-search-btn" id="btn-clear-search" onclick="clearCatalogSearch()" style="display: none;"
+              aria-label="Clear search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+          <div class="catalog-filter-group">
+            <button class="filter-pill active" data-filter="all" onclick="setCatalogFilter('all', this)">All Models</button>
+            <button class="filter-pill" data-filter="tools" onclick="setCatalogFilter('tools', this)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <path
+                  d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z">
+                </path>
+              </svg>
+              Tool Use Verified
+            </button>
+            <button class="filter-pill" data-filter="pipeline" onclick="setCatalogFilter('pipeline', this)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <circle cx="12" cy="12" r="6"></circle>
+                <circle cx="12" cy="12" r="2"></circle>
+              </svg>
+              In Active Pipeline
+            </button>
+          </div>
+        </div>
+
+        <div id="catalog-grid" class="catalog-grid">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 3: Claude Setup Guide -->
+    <section id="tab-claude" class="tab-content">
+      <!-- Pro-Tip Banner -->
+      <div class="tip-card">
+        <div class="tip-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path d="M9 18h6"></path>
+            <path d="M10 22h4"></path>
+            <path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14">
+            </path>
+          </svg>
+        </div>
+        <div>
+          <h4 class="tip-title">Pro-Tip: "Plan Mode" vs "Auto Mode" in Claude Code</h4>
+          <p class="tip-body">
+            If Claude Code prints <code>plan mode on</code>, it will <b>NOT</b> execute tools, read files, or write
+            code. Press <kbd class="kbd">Shift</kbd> + <kbd class="kbd">Tab</kbd> in your terminal to toggle back to
+            normal/auto execution mode.
+          </p>
+        </div>
+      </div>
+
+      <div class="setup-grid">
+        <!-- Card 1: Autonomous Agent Mode -->
+        <div class="card setup-card featured">
+          <div class="setup-badge">
+            <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2">
+              </polygon>
+            </svg>
+            Recommended for Autonomous Agents
+          </div>
+          <h3 class="setup-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round">
+              <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91 0z"></path>
+              <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"></path>
+              <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"></path>
+              <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"></path>
+            </svg>
+            1. Autonomous Agent Mode
+          </h3>
+          <p class="setup-desc">
+            Runs Claude Code with auto-approvals enabled so it executes bash commands, file edits, and tool actions
+            continuously without stopping to ask permission.
+          </p>
+          <div class="code-box">
+            <code>./run_claude.sh --dangerously-skip-permissions</code>
+            <button class="copy-btn" onclick="copySetupSnippet('agent', this)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              Copy
+            </button>
+          </div>
+          <div class="setup-note">
+            Runs via LiteLLM Proxy on <code>http://localhost:4000</code> with your active primary model.
+          </div>
+        </div>
+
+        <!-- Card 2: Interactive Safe Mode -->
+        <div class="card setup-card">
+          <h3 class="setup-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+            2. Interactive Safe Mode
+          </h3>
+          <p class="setup-desc">
+            Prompts you to approve each shell command and file write before executing. Ideal for delicate or
+            exploratory tasks.
+          </p>
+          <div class="code-box">
+            <code>./run_claude.sh</code>
+            <button class="copy-btn" onclick="copySetupSnippet('safe', this)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              Copy
+            </button>
+          </div>
+          <div class="setup-note">
+            Standard mode with manual approval gates.
+          </div>
+        </div>
+
+        <!-- Card 3: Claude Desktop Configuration -->
+        <div class="card setup-card">
+          <h3 class="setup-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+            3. Claude Desktop (Mac App)
+          </h3>
+          <p class="setup-desc">
+            Connect the official Claude Desktop app on macOS to route through this bridge:
+          </p>
+          <div class="config-path">
+            File: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>
+          </div>
+          <div class="code-box json-box">
+            <pre><code>{
+  "anthropic_base_url": "http://localhost:4000",
+  "anthropic_api_key": "sk-litellm-proxy"
+}</code></pre>
+            <button class="copy-btn" onclick="copySetupSnippet('desktop', this)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              Copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Card 4: Manual Terminal Shell Export -->
+        <div class="card setup-card">
+          <h3 class="setup-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round">
+              <line x1="4" y1="21" x2="4" y2="14"></line>
+              <line x1="4" y1="10" x2="4" y2="3"></line>
+              <line x1="12" y1="21" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12" y2="3"></line>
+              <line x1="20" y1="21" x2="20" y2="16"></line>
+              <line x1="20" y1="12" x2="20" y2="3"></line>
+              <line x1="1" y1="14" x2="7" y2="14"></line>
+              <line x1="9" y1="8" x2="15" y2="8"></line>
+              <line x1="17" y1="16" x2="23" y2="16"></line>
+            </svg>
+            4. Manual Shell Environment
+          </h3>
+          <p class="setup-desc">
+            If you want to run <code>claude</code> directly in any shell window:
+          </p>
+          <div class="code-box">
+            <code>export ANTHROPIC_BASE_URL="http://localhost:4000"
+export ANTHROPIC_API_KEY="sk-litellm-proxy"
+claude</code>
+            <button class="copy-btn" onclick="copySetupSnippet('shell', this)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              Copy
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 4: Raw YAML Config -->
+    <section id="tab-yaml" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+              </svg>
+              Raw Configuration (litellm_config.yaml)
+            </h2>
+            <p class="card-subtitle">Directly view and edit the YAML file underlying the LiteLLM proxy</p>
+          </div>
+          <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
+            <button class="btn btn-secondary btn-sm" onclick="loadExampleTemplate()">Load Starter Template</button>
+            <button class="btn btn-secondary btn-sm" onclick="loadConfig()">Reload</button>
+            <button id="btn-save-yaml" class="btn btn-primary btn-sm" onclick="saveRawYaml()">Save & Restart
+              Proxy</button>
+          </div>
+        </div>
+        <textarea id="raw-yaml-editor" class="yaml-textarea" spellcheck="false"></textarea>
+      </div>
+    </section>
+
+    <!-- Tab 5: Live Logs -->
+    <section id="tab-logs" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <line x1="8" y1="6" x2="21" y2="6"></line>
+                <line x1="8" y1="12" x2="21" y2="12"></line>
+                <line x1="8" y1="18" x2="21" y2="18"></line>
+                <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                <line x1="3" y1="18" x2="3.01" y2="18"></line>
+              </svg>
+              Proxy Execution & Routing Logs
+            </h2>
+            <p class="card-subtitle">Real-time live tail from the LiteLLM proxy highlighting active model routes and
+              fallbacks</p>
+          </div>
+          <div style="display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap;">
+            <div class="log-filter-pills">
+              <button class="filter-pill active" data-log-filter="all" onclick="setLogFilter('all', this)">All</button>
+              <button class="filter-pill" data-log-filter="model" onclick="setLogFilter('model', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                  stroke-linejoin="round">
+                  <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
+                </svg>
+                Model Active
+              </button>
+              <button class="filter-pill" data-log-filter="warning" onclick="setLogFilter('warning', this)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                  stroke-linejoin="round">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                  <line x1="12" y1="9" x2="12" y2="13"></line>
+                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>
+                Warnings / Fallbacks
+              </button>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="loadLogs()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+              Refresh
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="clearLogsView()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <!-- Search / stats / autoscroll sub-bar -->
+        <div class="log-subbar">
+          <div class="log-subbar-left">
+            <div class="search-input-wrapper">
+              <span class="search-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                  stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+              </span>
+              <input type="text" id="log-search-input" class="search-input"
+                placeholder="Search logs..." oninput="handleLogSearch(this.value)">
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="log-autoscroll-toggle" checked onchange="handleLogAutoscrollChange(this.checked)">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+            <label class="switch-label" for="log-autoscroll-toggle">Autoscroll</label>
+          </div>
+          <div class="log-stats">
+            <span class="stat-chip"><span class="stat-dot total"></span>Total <span class="stat-value"
+                id="stat-total">0</span></span>
+            <span class="stat-chip"><span class="stat-dot active"></span>Active <span class="stat-value"
+                id="stat-model-active">0</span></span>
+            <span class="stat-chip"><span class="stat-dot fallback"></span>Fallbacks <span class="stat-value"
+                id="stat-fallbacks">0</span></span>
+            <span class="stat-chip"><span class="stat-dot error"></span>Errors <span class="stat-value"
+                id="stat-errors">0</span></span>
+          </div>
+        </div>
+
+        <div id="log-container" class="log-card">
+          <div class="empty-state">Listening for proxy logs...</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Add / Edit Model Modal -->
+  <div id="model-modal" class="modal-backdrop">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 id="modal-title" class="modal-title">Add / Edit Model</h3>
+        <button class="icon-btn" onclick="closeModelModal()" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div>
+        <div class="form-group">
+          <label class="form-label" for="modal-model-name">Model Identifier / Name</label>
+          <input type="text" id="modal-model-name" class="form-input" placeholder="e.g. grok-4.7-free or ollama/llama3">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="modal-api-base">API Base URL</label>
+          <input type="text" id="modal-api-base" class="form-input" placeholder="e.g. https://api.apmix.ai/v1">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="modal-api-key">API Key</label>
+          <div style="display: flex; gap: 0.4rem;">
+            <input type="text" id="modal-api-key" class="form-input" placeholder="sk-... or dummy key for local">
+            <button class="icon-btn" onclick="copyApiKeyFromModal()" title="Copy API key to clipboard"
+              aria-label="Copy API key">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="modal-target-model">Target Model ID (OpenAI format)</label>
+          <input type="text" id="modal-target-model" class="form-input" placeholder="e.g. grok-4.7-free">
+        </div>
+        <div id="modal-test-result" style="margin-top: 0.5rem; font-size: 0.8rem; font-family: var(--font-mono);"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="testModalModel()">Test Connection</button>
+        <button class="btn btn-primary" onclick="saveModalModel()">Save to Catalog</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Modal (replaces browser confirm dialogs) -->
+  <div id="confirm-modal" class="modal-backdrop">
+    <div class="modal-box confirm-box" id="confirm-box">
+      <div class="confirm-icon" id="confirm-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+      </div>
+      <h3 id="confirm-title" class="confirm-title">Are you sure?</h3>
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="confirm-cancel-btn">Cancel</button>
+        <button class="btn btn-danger-solid" id="confirm-ok-btn">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/static/app.js"></script>
+
+</body>
+
+</html>

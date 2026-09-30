@@ -1,0 +1,82 @@
+model_list:
+  # ---------------------------------------------------------------------------
+  # A. WILDCARD & DEFAULT ROUTES (For Claude Code & Desktop)
+  # Maps all unmapped model requests to your primary custom provider
+  # ---------------------------------------------------------------------------
+  - model_name: "claude*"
+    litellm_params:
+      model: "openai/your-primary-model"
+      api_base: "https://api.your-provider.com/v1"
+      api_key: "YOUR_API_KEY_HERE"
+
+  - model_name: "*"
+    litellm_params:
+      model: "openai/your-primary-model"
+      api_base: "https://api.your-provider.com/v1"
+      api_key: "YOUR_API_KEY_HERE"
+
+  - model_name: "default"
+    litellm_params:
+      model: "openai/your-primary-model"
+      api_base: "https://api.your-provider.com/v1"
+      api_key: "YOUR_API_KEY_HERE"
+
+  # ---------------------------------------------------------------------------
+  # B. CLAUDE DESKTOP & CLI DROPDOWN MODEL MAPPINGS
+  # Standard model IDs requested by Claude Desktop / Claude Code UI
+  # ---------------------------------------------------------------------------
+  - model_name: "claude-3-5-sonnet-20241022"
+    litellm_params:
+      model: "openai/your-primary-model"
+      api_base: "https://api.your-provider.com/v1"
+      api_key: "YOUR_API_KEY_HERE"
+
+  - model_name: "claude-3-7-sonnet-20250219"
+    litellm_params:
+      model: "openai/your-reasoning-model"
+      api_base: "https://api.your-provider.com/v1"
+      api_key: "YOUR_API_KEY_HERE"
+
+  - model_name: "claude-3-5-haiku-20241022"
+    litellm_params:
+      model: "openai/your-fast-model"
+      api_base: "https://api.your-provider.com/v1"
+      api_key: "YOUR_API_KEY_HERE"
+
+  - model_name: "claude-opus-5-5"
+    litellm_params:
+      model: "openai/your-primary-model"
+      api_base: "https://api.your-provider.com/v1"
+      api_key: "YOUR_API_KEY_HERE"
+
+  # ---------------------------------------------------------------------------
+  # C. SAMPLE CUSTOM PROVIDERS & BACKUP MODELS
+  # Add your favorite OpenAI-compatible models here for automatic failovers
+  # ---------------------------------------------------------------------------
+  - model_name: "deepseek-chat"
+    litellm_params:
+      model: "openai/deepseek-chat"
+      api_base: "https://api.deepseek.com/v1"
+      api_key: "YOUR_DEEPSEEK_API_KEY"
+
+  - model_name: "openrouter-claude"
+    litellm_params:
+      model: "openai/anthropic/claude-3.5-sonnet"
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: "YOUR_OPENROUTER_API_KEY"
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 3
+  cooldown_time: 10
+  allowed_fails: 1
+  fallbacks:
+    - claude*: &default_fallbacks
+        - deepseek-chat
+        - openrouter-claude
+    - "*": *default_fallbacks
+    - default: *default_fallbacks
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 90

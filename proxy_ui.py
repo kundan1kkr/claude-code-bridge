@@ -296,24 +296,51 @@ async def get_config():
     # Find what the Claude aliases currently point to
     current_primary = None
     alias_target_str = None
+    alias_base_str = None
     for item in model_list:
         if item.get("model_name") in ("default", "claude-3-5-sonnet-20241022", "claude*"):
-            alias_target_str = item.get("litellm_params", {}).get("model", "")
+            params = item.get("litellm_params", {})
+            alias_target_str = params.get("model", "")
             if alias_target_str.startswith("openai/"):
                 alias_target_str = alias_target_str[len("openai/"):]
+            alias_base_str = (params.get("api_base") or "").rstrip("/")
             break
 
     # Match alias_target_str with concrete model_name in model_list
     if alias_target_str:
+        # Priority 1: match on both target/name AND api_base (exact provider match)
         for item in model_list:
             m_name = item.get("model_name")
             if m_name and m_name not in claude_alias_keys:
-                tgt = item.get("litellm_params", {}).get("model", "")
+                params = item.get("litellm_params", {})
+                tgt = params.get("model", "")
                 if tgt.startswith("openai/"):
                     tgt = tgt[len("openai/"):]
-                if m_name == alias_target_str or tgt == alias_target_str:
+                m_base = (params.get("api_base") or "").rstrip("/")
+                if (m_name == alias_target_str or tgt == alias_target_str) and alias_base_str and m_base == alias_base_str:
                     current_primary = m_name
                     break
+
+        # Priority 2: match on model_name
+        if not current_primary:
+            for item in model_list:
+                m_name = item.get("model_name")
+                if m_name and m_name not in claude_alias_keys and m_name == alias_target_str:
+                    current_primary = m_name
+                    break
+
+        # Priority 3: match on target
+        if not current_primary:
+            for item in model_list:
+                m_name = item.get("model_name")
+                if m_name and m_name not in claude_alias_keys:
+                    tgt = item.get("litellm_params", {}).get("model", "")
+                    if tgt.startswith("openai/"):
+                        tgt = tgt[len("openai/"):]
+                    if tgt == alias_target_str:
+                        current_primary = m_name
+                        break
+
         if not current_primary:
             current_primary = alias_target_str
 
@@ -330,15 +357,28 @@ async def get_config():
                         for fb in v:
                             clean_fb = fb[len("openai/"):] if fb.startswith("openai/") else fb
                             matched_name = clean_fb
+
+                            # 1. Exact match on model_name has first priority
+                            found = False
                             for c_item in model_list:
                                 c_m = c_item.get("model_name")
-                                if c_m and c_m not in claude_alias_keys:
-                                    c_tgt = c_item.get("litellm_params", {}).get("model", "")
-                                    if c_tgt.startswith("openai/"):
-                                        c_tgt = c_tgt[len("openai/"):]
-                                    if c_m == clean_fb or c_tgt == clean_fb:
-                                        matched_name = c_m
-                                        break
+                                if c_m and c_m not in claude_alias_keys and c_m == clean_fb:
+                                    matched_name = c_m
+                                    found = True
+                                    break
+
+                            # 2. Only if no model_name matched, check target_model
+                            if not found:
+                                for c_item in model_list:
+                                    c_m = c_item.get("model_name")
+                                    if c_m and c_m not in claude_alias_keys:
+                                        c_tgt = c_item.get("litellm_params", {}).get("model", "")
+                                        if c_tgt.startswith("openai/"):
+                                            c_tgt = c_tgt[len("openai/"):]
+                                        if c_tgt == clean_fb:
+                                            matched_name = c_m
+                                            break
+
                             if matched_name not in current_pipeline:
                                 current_pipeline.append(matched_name)
 
@@ -414,7 +454,8 @@ async def save_model(req: SaveModelRequest):
             curr_target = curr_p.get("model", "")
             if curr_target.startswith("openai/"):
                 curr_target = curr_target[len("openai/"):]
-            if curr_target in (raw_target, req.model_name) or target_str == curr_p.get("model", ""):
+            curr_base = (curr_p.get("api_base") or "").rstrip("/")
+            if (curr_target == raw_target and curr_base == api_base):
                 is_primary = True
             break
 

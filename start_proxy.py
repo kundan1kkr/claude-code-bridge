@@ -18,6 +18,24 @@ litellm.callbacks.append(proxy_handler_instance)
 # Always use /chat/completions instead of /responses for OpenAI-compatible providers
 litellm.use_chat_completions_url_for_anthropic_messages = True
 
+# Suppress upstream LiteLLM bug where streaming Anthropic responses
+# pass result=None to AnthropicResponse.model_validate during background success logging.
+try:
+    from litellm.litellm_core_utils.litellm_logging import Logging
+    _orig_handle_anthropic = Logging._handle_anthropic_messages_response_logging
+
+    def _safe_handle_anthropic_messages_response_logging(self, result):
+        if result is None:
+            return litellm.ModelResponse()
+        try:
+            return _orig_handle_anthropic(self, result)
+        except Exception:
+            return litellm.ModelResponse()
+
+    Logging._handle_anthropic_messages_response_logging = _safe_handle_anthropic_messages_response_logging
+except Exception:
+    pass
+
 if __name__ == "__main__":
     from litellm import run_server
     sys.exit(run_server())

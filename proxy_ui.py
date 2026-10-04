@@ -814,10 +814,19 @@ async def test_provider(req: TestProviderRequest):
     if not api_base.endswith("/v1"):
         api_base += "/v1"
 
+    is_omnirush = "omnirush" in api_base.lower() or req.api_key.startswith("omnirush-") or model in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol")
+    api_key = req.api_key
+    if is_omnirush:
+        stored_tok = get_omnirush_token()
+        if stored_tok:
+            api_key = stored_tok
+        if "omnirush.ai" in api_base:
+            api_base = "http://127.0.0.1:4001/adapter/omnirush/v1"
+
     url = f"{api_base}/chat/completions"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {req.api_key}",
+        "Authorization": f"Bearer {api_key}",
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
     }
     payload = {
@@ -830,6 +839,13 @@ async def test_provider(req: TestProviderRequest):
     try:
         async with httpx.AsyncClient(timeout=35.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 401 and is_omnirush:
+                new_tok = await refresh_omnirush_token()
+                if new_tok:
+                    api_key = new_tok
+                    headers["Authorization"] = f"Bearer {api_key}"
+                    resp = await client.post(url, headers=headers, json=payload)
+
             elapsed_ms = round((time.time() - start) * 1000, 1)
 
             if resp.status_code == 200:
@@ -856,7 +872,7 @@ async def test_provider(req: TestProviderRequest):
                     "error": None
                 }
             else:
-                if resp.status_code == 404 and "unsupported_model_endpoint" in resp.text:
+                if (resp.status_code == 404 and "unsupported_model_endpoint" in resp.text) or (is_omnirush and "omnirush.ai" in api_base):
                     resp_url = f"{api_base}/responses"
                     resp_payload = {
                         "model": model,
@@ -865,25 +881,41 @@ async def test_provider(req: TestProviderRequest):
                         "input": [{"role": "user", "content": "ping"}]
                     }
                     try:
-                        async with client.stream("POST", resp_url, headers=headers, json=resp_payload, timeout=20.0) as s_resp:
-                            if s_resp.status_code == 200:
-                                full_text = ""
-                                async for line in s_resp.aiter_lines():
-                                    if line.startswith("data: "):
-                                        try:
-                                            d = json.loads(line[6:])
-                                            if d.get("type") == "response.output_text.delta":
-                                                full_text += d.get("delta", "")
-                                        except Exception:
-                                            pass
-                                elapsed_ms = round((time.time() - start) * 1000, 1)
-                                return {
-                                    "success": True,
-                                    "status_code": 200,
-                                    "latency_ms": elapsed_ms,
-                                    "response": full_text.strip() or "OK (Responses API verified)",
-                                    "error": None
-                                }
+                        for r_attempt in range(2):
+                            async with client.stream("POST", resp_url, headers=headers, json=resp_payload, timeout=20.0) as s_resp:
+                                if s_resp.status_code == 401 and r_attempt == 0 and is_omnirush:
+                                    new_tok = await refresh_omnirush_token()
+                                    if new_tok:
+                                        api_key = new_tok
+                                        headers["Authorization"] = f"Bearer {api_key}"
+                                        continue
+                                if s_resp.status_code == 200:
+                                    full_text = ""
+                                    async for line in s_resp.aiter_lines():
+                                        if line.startswith("data: "):
+                                            try:
+                                                d = json.loads(line[6:])
+                                                if d.get("type") == "response.output_text.delta":
+                                                    full_text += d.get("delta", "")
+                                            except Exception:
+                                                pass
+                                    elapsed_ms = round((time.time() - start) * 1000, 1)
+                                    return {
+                                        "success": True,
+                                        "status_code": 200,
+                                        "latency_ms": elapsed_ms,
+                                        "response": full_text.strip() or "OK (Responses API verified)",
+                                        "error": None
+                                    }
+                                else:
+                                    err_b = await s_resp.aread()
+                                    return {
+                                        "success": False,
+                                        "status_code": s_resp.status_code,
+                                        "latency_ms": round((time.time() - start) * 1000, 1),
+                                        "response": None,
+                                        "error": f"HTTP {s_resp.status_code}: {err_b.decode('utf-8', errors='ignore')[:1500]}"
+                                    }
                     except Exception as ex:
                         print(f"[TEST-PROVIDER RESPONSES FALLBACK ERROR]: {ex}", flush=True)
 
@@ -996,6 +1028,19 @@ async def refresh_omnirush_token() -> str:
                                 json.dump(data, f, indent=2)
                         except Exception:
                             pass
+                    # Also sync dahl_litellm_config.yaml if present
+                    try:
+                        cfg_path = APP_DIR / "dahl_litellm_config.yaml"
+                        if cfg_path.exists():
+                            with open(cfg_path, "r", encoding="utf-8") as f:
+                                c_text = f.read()
+                            import re
+                            updated_c = re.sub(r'omnirush-[a-f0-9]+', new_access, c_text)
+                            if updated_c != c_text:
+                                with open(cfg_path, "w", encoding="utf-8") as f:
+                                    f.write(updated_c)
+                    except Exception:
+                        pass
                     print(f"[OMNIRUSH REFRESH] Token refreshed successfully: {new_access[:20]}...", flush=True)
                     return new_access
     except Exception as e:
@@ -1364,41 +1409,48 @@ async def omnirush_adapter(path: str, request: Request):
             full_text = ""
             created_ts = int(time.time())
             tool_calls = []
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                async with client.stream(
-                    "POST",
-                    f"{target_base}/responses",
-                    headers={"Authorization": auth_header, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-                    json=payload
-                ) as upstream_resp:
-                    if upstream_resp.status_code != 200:
-                        err_text = await upstream_resp.aread()
-                        return JSONResponse(status_code=upstream_resp.status_code, content={"error": err_text.decode('utf-8', errors='ignore')})
-                    async for raw_line in upstream_resp.aiter_lines():
-                        line = raw_line.strip()
-                        if line.startswith("data: "):
-                            try:
-                                d = json.loads(line[6:].strip())
-                                t = d.get("type")
-                                if t == "response.output_text.delta":
-                                    full_text += d.get("delta", "")
-                                elif t == "response.output_item.added":
-                                    item = d.get("item", {})
-                                    if item.get("type") == "function_call":
-                                        tool_calls.append({
-                                            "id": item.get("call_id", f"call_{int(time.time()*1000)}"),
-                                            "type": "function",
-                                            "function": {
-                                                "name": item.get("name", ""),
-                                                "arguments": ""
-                                            }
-                                        })
-                                elif t == "response.function_call_arguments.delta":
-                                    idx = d.get("output_index", 0)
-                                    if idx < len(tool_calls):
-                                        tool_calls[idx]["function"]["arguments"] += d.get("delta", "")
-                            except Exception:
-                                pass
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{target_base}/responses",
+                        headers={"Authorization": auth_header, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                        json=payload
+                    ) as upstream_resp:
+                        if upstream_resp.status_code == 401 and attempt == 0:
+                            new_tok = await refresh_omnirush_token()
+                            if new_tok:
+                                auth_header = f"Bearer {new_tok}"
+                                continue
+                        if upstream_resp.status_code != 200:
+                            err_text = await upstream_resp.aread()
+                            return JSONResponse(status_code=upstream_resp.status_code, content={"error": err_text.decode('utf-8', errors='ignore')})
+                        async for raw_line in upstream_resp.aiter_lines():
+                            line = raw_line.strip()
+                            if line.startswith("data: "):
+                                try:
+                                    d = json.loads(line[6:].strip())
+                                    t = d.get("type")
+                                    if t == "response.output_text.delta":
+                                        full_text += d.get("delta", "")
+                                    elif t == "response.output_item.added":
+                                        item = d.get("item", {})
+                                        if item.get("type") == "function_call":
+                                            tool_calls.append({
+                                                "id": item.get("call_id", f"call_{int(time.time()*1000)}"),
+                                                "type": "function",
+                                                "function": {
+                                                    "name": item.get("name", ""),
+                                                    "arguments": ""
+                                                }
+                                            })
+                                    elif t == "response.function_call_arguments.delta":
+                                        idx = d.get("output_index", 0)
+                                        if idx < len(tool_calls):
+                                            tool_calls[idx]["function"]["arguments"] += d.get("delta", "")
+                                except Exception:
+                                    pass
+                        break
 
             msg = {"role": "assistant"}
             if tool_calls:

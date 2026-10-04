@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import socket
 import signal
 import subprocess
@@ -8,9 +9,9 @@ import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import httpx
 import yaml
@@ -21,13 +22,15 @@ if (APP_DIR / "litellm_config.yaml").exists() or not (APP_DIR / "dahl_litellm_co
 else:
     CONFIG_PATH = APP_DIR / "dahl_litellm_config.yaml"
 BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
+STATE_PATH = CONFIG_PATH.with_suffix(".models.local.json")
 EXAMPLE_CONFIG_PATH = APP_DIR / "litellm_config.example.yaml"
 
 def ensure_config_exists():
-    global CONFIG_PATH, BACKUP_PATH
+    global CONFIG_PATH, BACKUP_PATH, STATE_PATH
     if not CONFIG_PATH.exists() and EXAMPLE_CONFIG_PATH.exists():
         shutil.copyfile(EXAMPLE_CONFIG_PATH, CONFIG_PATH)
     BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
+    STATE_PATH = CONFIG_PATH.with_suffix(".models.local.json")
 
 ensure_config_exists()
 
@@ -118,6 +121,64 @@ def apply_router_defaults(data):
     settings["use_chat_completions_url_for_anthropic_messages"] = True
 
 
+def read_model_state():
+    if not STATE_PATH.exists():
+        return {"disabled": {}, "pipeline": []}
+    with open(STATE_PATH, encoding="utf-8") as f:
+        state = json.load(f)
+    return {"disabled": state.get("disabled", {}), "pipeline": state.get("pipeline", [])}
+
+
+def write_model_state(state):
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix=".models-", dir=STATE_PATH.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.chmod(path, 0o600)
+        os.replace(path, STATE_PATH)
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def active_model_names(data):
+    return {item.get("model_name") for item in data.get("model_list", [])
+            if item.get("model_name") not in CLAUDE_ALIASES}
+
+
+def reconcile_models(data, state, pipeline=None):
+    disabled = state["disabled"]
+    groups = {}
+    for item in data.get("model_list", []):
+        name = item.get("model_name")
+        if name and name not in CLAUDE_ALIASES and name not in disabled:
+            groups.setdefault(name, []).append(item)
+    order = list(dict.fromkeys(pipeline if pipeline is not None else state["pipeline"]))
+    enabled_order = [name for name in order if name in groups]
+    if not enabled_order and groups:
+        enabled_order = [next(iter(groups))]
+    primary = enabled_order[0] if enabled_order else None
+    aliases = []
+    if primary:
+        for alias in CLAUDE_ALIASES:
+            for item in groups[primary]:
+                aliases.append({"model_name": alias, "litellm_params": dict(item["litellm_params"])})
+    data["model_list"] = aliases + [item for group in groups.values() for item in group]
+    router = data.setdefault("router_settings", {})
+    router["fallbacks"] = ([{alias: enabled_order[1:]} for alias in CLAUDE_ALIASES] +
+                           [{name: enabled_order[i + 1:]} for i, name in enumerate(enabled_order[:-1])])
+    apply_router_defaults(data)
+    return primary
+
+
+def save_runtime_config(data):
+    if CONFIG_PATH.exists():
+        shutil.copyfile(CONFIG_PATH, BACKUP_PATH)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False, indent=2)
+
+
 app = FastAPI(title="Claude Proxy Bridge Manager", version="1.0.0")
 
 @app.middleware("http")
@@ -196,6 +257,11 @@ def stop_proxy_process():
 
 
 def start_proxy_process():
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not active_model_names(data):
+        stop_proxy_process()
+        raise HTTPException(status_code=400, detail="Turn on a model before starting the proxy")
     stop_proxy_process()
     log_fd = open(LOG_FILE, "a")
     python_bin = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
@@ -205,8 +271,11 @@ def start_proxy_process():
         "--config", str(CONFIG_PATH),
         "--port", "4000"
     ]
+    env = os.environ.copy()
+    env["BRIDGE_CONFIG_PATH"] = str(CONFIG_PATH)
     proc = subprocess.Popen(
         cmd,
+        env=env,
         stdout=log_fd,
         stderr=subprocess.STDOUT,
         cwd=str(APP_DIR),
@@ -382,9 +451,12 @@ async def get_config():
                             if matched_name not in current_pipeline:
                                 current_pipeline.append(matched_name)
 
+    state = read_model_state()
+    if state["pipeline"]:
+        current_pipeline = state["pipeline"][:]
     # Collect distinct concrete models
     catalog = {}
-    for item in model_list:
+    for item in model_list + [entry for group in state["disabled"].values() for entry in group]:
         m_name = item.get("model_name")
         params = item.get("litellm_params", {})
         if m_name and m_name not in claude_alias_keys:
@@ -395,6 +467,7 @@ async def get_config():
             if m_name not in catalog:
                 catalog[m_name] = {
                     "model_name": m_name,
+                    "enabled": m_name not in state["disabled"],
                     "target_model": raw_model,
                     "api_base": params.get("api_base", ""),
                     "api_key": entry_key,
@@ -412,6 +485,45 @@ async def get_config():
         "router_settings": router_settings,
         "claude_aliases": list(claude_alias_keys)
     }
+
+
+class ToggleModelRequest(BaseModel):
+    model_name: str
+    enabled: bool
+
+
+@app.post("/api/config/model/toggle")
+async def toggle_model(req: ToggleModelRequest):
+    if req.model_name in CLAUDE_ALIASES:
+        raise HTTPException(status_code=400, detail="Claude route aliases cannot be toggled")
+    config = await get_config()
+    if req.model_name not in config["catalog"]:
+        raise HTTPException(status_code=404, detail="Model not found")
+    state = read_model_state()
+    if config["catalog"][req.model_name]["enabled"] == req.enabled:
+        return config
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    pipeline = [name for name in config["pipeline"] if name != req.model_name]
+    if not req.enabled and not pipeline:
+        pipeline = [name for name, model in config["catalog"].items()
+                    if name != req.model_name and model["enabled"]]
+    if req.enabled:
+        data.setdefault("model_list", []).extend(state["disabled"].pop(req.model_name))
+        if not pipeline:
+            pipeline = [req.model_name]
+    else:
+        state["disabled"][req.model_name] = [item for item in data.get("model_list", [])
+                                                if item.get("model_name") == req.model_name]
+    state["pipeline"] = pipeline
+    reconcile_models(data, state, pipeline)
+    save_runtime_config(data)
+    write_model_state(state)
+    if active_model_names(data):
+        start_proxy_process()
+    else:
+        stop_proxy_process()
+    return await get_config()
 
 
 class SaveModelRequest(BaseModel):
@@ -432,12 +544,14 @@ async def save_model(req: SaveModelRequest):
 
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-
-    shutil.copyfile(CONFIG_PATH, BACKUP_PATH)
+    state = read_model_state()
 
     api_base = req.api_base.rstrip("/")
     if not api_base.endswith("/v1"):
         api_base += "/v1"
+
+    if "omnirush.ai" in api_base:
+        api_base = "http://127.0.0.1:4001/adapter/omnirush/v1"
 
     model_list = data.get("model_list", [])
     raw_target = req.target_model or req.model_name
@@ -463,6 +577,10 @@ async def save_model(req: SaveModelRequest):
     # whole key group) and re-emit it from `keys`. Entries for OTHER models are
     # left alone — editing one model must never rewrite another model's keys.
     deployments = build_deployments(req.model_name, target_str, api_base, keys)
+    if req.model_name in state["disabled"]:
+        state["disabled"][req.model_name] = deployments
+        write_model_state(state)
+        return await get_status()
     rebuilt = []
     inserted = False
     for item in model_list:
@@ -487,12 +605,13 @@ async def save_model(req: SaveModelRequest):
         rebuilt.extend(deployments)
 
     data["model_list"] = rebuilt
-    apply_router_defaults(data)
+    if state["disabled"]:
+        reconcile_models(data, state)
+    else:
+        apply_router_defaults(data)
+    save_runtime_config(data)
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, sort_keys=False, indent=2)
-
-    if req.restart_proxy:
+    if req.restart_proxy and active_model_names(data):
         start_proxy_process()
 
     return await get_status()
@@ -509,8 +628,9 @@ async def save_pipeline(req: SavePipelineRequest):
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
-    # Backup existing
-    shutil.copyfile(CONFIG_PATH, BACKUP_PATH)
+    state = read_model_state()
+    if any(name in state["disabled"] for name in req.pipeline):
+        raise HTTPException(status_code=400, detail="Enable disabled models before adding them to the pipeline")
 
     model_list = data.get("model_list", [])
     primary_id = req.pipeline[0]
@@ -534,7 +654,7 @@ async def save_pipeline(req: SavePipelineRequest):
 
     if req.models:
         for m_name, m_def in req.models.items():
-            if m_name in claude_aliases:
+            if m_name in claude_aliases or m_name in state["disabled"]:
                 continue
             raw_target = m_def.get("target_model") or m_def.get("model") or m_name
             target_str = f"openai/{raw_target}" if not raw_target.startswith("openai/") else raw_target
@@ -645,11 +765,12 @@ async def save_pipeline(req: SavePipelineRequest):
     data["router_settings"]["fallbacks"] = fallbacks_list
     apply_router_defaults(data)
 
-    # Save to file
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, sort_keys=False, indent=2)
+    state["pipeline"] = req.pipeline[:]
+    reconcile_models(data, state, req.pipeline)
+    save_runtime_config(data)
+    write_model_state(state)
 
-    if req.restart_proxy:
+    if req.restart_proxy and active_model_names(data):
         start_proxy_process()
 
     return await get_status()
@@ -664,21 +785,30 @@ async def save_raw_config(req: SaveRawConfigRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 
-    shutil.copyfile(CONFIG_PATH, BACKUP_PATH)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        f.write(req.yaml_content)
+    state = read_model_state()
+    for name in state["disabled"]:
+        supplied = [item for item in data.get("model_list", []) if item.get("model_name") == name]
+        if supplied:
+            state["disabled"][name] = supplied
+    if state["disabled"]:
+        reconcile_models(data, state)
+    save_runtime_config(data)
+    write_model_state(state)
 
     if req.restart_proxy:
-        start_proxy_process()
+        if active_model_names(data):
+            start_proxy_process()
+        else:
+            stop_proxy_process()
 
     return await get_status()
 
 
 @app.post("/api/test-provider")
 async def test_provider(req: TestProviderRequest):
-    model = req.model
+    model = req.model.strip()
     if model.startswith("openai/"):
-        model = model[len("openai/"):]
+        model = model[len("openai/"):].strip()
 
     api_base = req.api_base.rstrip("/")
     if not api_base.endswith("/v1"):
@@ -687,7 +817,8 @@ async def test_provider(req: TestProviderRequest):
     url = f"{api_base}/chat/completions"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {req.api_key}"
+        "Authorization": f"Bearer {req.api_key}",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
     }
     payload = {
         "model": model,
@@ -725,12 +856,44 @@ async def test_provider(req: TestProviderRequest):
                     "error": None
                 }
             else:
+                if resp.status_code == 404 and "unsupported_model_endpoint" in resp.text:
+                    resp_url = f"{api_base}/responses"
+                    resp_payload = {
+                        "model": model,
+                        "store": False,
+                        "stream": True,
+                        "input": [{"role": "user", "content": "ping"}]
+                    }
+                    try:
+                        async with client.stream("POST", resp_url, headers=headers, json=resp_payload, timeout=20.0) as s_resp:
+                            if s_resp.status_code == 200:
+                                full_text = ""
+                                async for line in s_resp.aiter_lines():
+                                    if line.startswith("data: "):
+                                        try:
+                                            d = json.loads(line[6:])
+                                            if d.get("type") == "response.output_text.delta":
+                                                full_text += d.get("delta", "")
+                                        except Exception:
+                                            pass
+                                elapsed_ms = round((time.time() - start) * 1000, 1)
+                                return {
+                                    "success": True,
+                                    "status_code": 200,
+                                    "latency_ms": elapsed_ms,
+                                    "response": full_text.strip() or "OK (Responses API verified)",
+                                    "error": None
+                                }
+                    except Exception as ex:
+                        print(f"[TEST-PROVIDER RESPONSES FALLBACK ERROR]: {ex}", flush=True)
+
+                print(f"[TEST-PROVIDER ERROR] {resp.status_code} from {url} for model '{model}': {resp.text}", flush=True)
                 return {
                     "success": False,
                     "status_code": resp.status_code,
                     "latency_ms": elapsed_ms,
                     "response": None,
-                    "error": f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    "error": f"HTTP {resp.status_code}: {resp.text[:1500]}"
                 }
     except httpx.TimeoutException:
         elapsed_ms = round((time.time() - start) * 1000, 1)
@@ -777,6 +940,495 @@ async def serve_index():
     if index_file.exists():
         return FileResponse(index_file)
     return JSONResponse({"message": "Static assets loading..."})
+
+
+def get_omnirush_auth_path() -> Path:
+    local_path = APP_DIR / ".omnirush_auth.json"
+    if local_path.exists():
+        return local_path
+    return Path(os.path.expanduser("~/.omnirush/auth.json"))
+
+
+def get_omnirush_token() -> str:
+    for auth_path in [APP_DIR / ".omnirush_auth.json", Path(os.path.expanduser("~/.omnirush/auth.json"))]:
+        if auth_path.exists():
+            try:
+                with open(auth_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                token = data.get("accessToken", "")
+                if token:
+                    return token
+            except Exception:
+                pass
+    return os.environ.get("OMNIRUSH_API_KEY", "")
+
+
+async def refresh_omnirush_token() -> str:
+    auth_path = get_omnirush_auth_path()
+    if not auth_path.exists():
+        return ""
+    try:
+        with open(auth_path, encoding="utf-8") as f:
+            data = json.load(f)
+        refresh_token = data.get("refreshToken", "")
+        if not refresh_token:
+            return ""
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://omnirush.ai/omnirush/device/refresh",
+                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                json={"refresh_token": refresh_token}
+            )
+            if resp.status_code == 200:
+                res_json = resp.json()
+                new_access = res_json.get("access_token", "")
+                new_refresh = res_json.get("refresh_token", "")
+                if new_access:
+                    data["accessToken"] = new_access
+                    if new_refresh:
+                        data["refreshToken"] = new_refresh
+                    data["savedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    # Save to both locations if possible
+                    for p in [APP_DIR / ".omnirush_auth.json", Path(os.path.expanduser("~/.omnirush/auth.json"))]:
+                        try:
+                            p.parent.mkdir(parents=True, exist_ok=True)
+                            with open(p, "w", encoding="utf-8") as f:
+                                json.dump(data, f, indent=2)
+                        except Exception:
+                            pass
+                    print(f"[OMNIRUSH REFRESH] Token refreshed successfully: {new_access[:20]}...", flush=True)
+                    return new_access
+    except Exception as e:
+        print(f"[OMNIRUSH REFRESH ERROR]: {e}", flush=True)
+    return ""
+
+
+@app.api_route("/adapter/omnirush/v1/{path:path}", methods=["GET", "POST", "OPTIONS"])
+async def omnirush_adapter(path: str, request: Request):
+    """
+    Translates requests to OmniRush's /v1/responses endpoint.
+    Supports both standard /chat/completions and direct /responses calls from LiteLLM.
+    Includes auto-token-refresh on 401.
+    """
+    if request.method == "OPTIONS":
+        return JSONResponse({"status": "ok"})
+
+    token = get_omnirush_token()
+    auth_header = f"Bearer {token}" if token else request.headers.get("authorization", "")
+    target_base = "https://omnirush.ai/omnirush/v1"
+
+    if path == "models" and request.method == "GET":
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{target_base}/models",
+                headers={"Authorization": auth_header, "User-Agent": "Mozilla/5.0"}
+            )
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+
+    # Direct /responses endpoint requested by LiteLLM
+    if path == "responses" and request.method == "POST":
+        body = await request.json()
+        model = body.get("model", "gpt-6-astra")
+        if model.startswith("openai/"):
+            model = model[len("openai/"):]
+
+        # Clean or convert input items
+        raw_input = body.get("input", [])
+        clean_input = []
+        for item in raw_input:
+            if isinstance(item, dict):
+                role = item.get("role", "user")
+                c = item.get("content", "")
+                if isinstance(c, list):
+                    cp = []
+                    for part in c:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            cp.append({"type": "output_text" if role == "assistant" else "input_text", "text": part.get("text", "")})
+                        else:
+                            cp.append(part)
+                    clean_input.append({**item, "content": cp})
+                else:
+                    clean_input.append(item)
+            else:
+                clean_input.append(item)
+
+        payload = {
+            **body,
+            "model": model,
+            "store": False,
+            "stream": True,
+            "input": clean_input
+        }
+        if body.get("tools"):
+            converted_tools = []
+            for tool in body["tools"]:
+                if isinstance(tool, dict) and tool.get("type") == "function" and "function" in tool:
+                    fn = tool["function"]
+                    c_tool = {
+                        "type": "function",
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {})
+                    }
+                    if "strict" in fn:
+                        c_tool["strict"] = fn["strict"]
+                    converted_tools.append(c_tool)
+                else:
+                    converted_tools.append(tool)
+            payload["tools"] = converted_tools
+
+        async def responses_stream():
+            nonlocal auth_header
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{target_base}/responses",
+                        headers={"Authorization": auth_header, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                        json=payload
+                    ) as upstream_resp:
+                        if upstream_resp.status_code == 401 and attempt == 0:
+                            new_tok = await refresh_omnirush_token()
+                            if new_tok:
+                                auth_header = f"Bearer {new_tok}"
+                                continue
+                        if upstream_resp.status_code != 200:
+                            err_bytes = await upstream_resp.aread()
+                            yield f"event: error\ndata: {err_bytes.decode('utf-8', errors='ignore')}\n\n"
+                            return
+
+                        async for line in upstream_resp.aiter_lines():
+                            if line:
+                                yield f"{line}\n"
+                            else:
+                                yield "\n"
+                        return
+
+        return StreamingResponse(responses_stream(), media_type="text/event-stream")
+
+    if path in ("chat/completions", "completions") and request.method == "POST":
+        body = await request.json()
+        model = body.get("model", "gpt-6-astra")
+        if model.startswith("openai/"):
+            model = model[len("openai/"):]
+
+        messages = body.get("messages", [])
+        input_items = []
+        for m in messages:
+            role = m.get("role", "user")
+            # Handle tool result messages from client
+            if role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": m.get("tool_call_id", ""),
+                    "output": str(m.get("content", ""))
+                })
+                continue
+
+            # Handle assistant messages with tool calls
+            if role == "assistant" and m.get("tool_calls"):
+                if m.get("content"):
+                    content_val = m["content"]
+                    if isinstance(content_val, list):
+                        conv = []
+                        for p in content_val:
+                            if isinstance(p, dict) and p.get("type") == "text":
+                                conv.append({"type": "output_text", "text": p.get("text", "")})
+                            else:
+                                conv.append(p)
+                        input_items.append({"role": "assistant", "content": conv})
+                    else:
+                        input_items.append({"role": "assistant", "content": str(content_val)})
+
+                for tc in m.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", "{}")
+                    })
+                continue
+
+            content = m.get("content", "")
+            if isinstance(content, list):
+                converted_parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        ptype = part.get("type", "text")
+                        if ptype == "text":
+                            new_type = "output_text" if role == "assistant" else "input_text"
+                            converted_parts.append({"type": new_type, "text": part.get("text", "")})
+                        elif ptype == "image_url":
+                            converted_parts.append({"type": "input_image", "image_url": part.get("image_url", {}).get("url", "")})
+                        else:
+                            converted_parts.append(part)
+                    elif isinstance(part, str):
+                        new_type = "output_text" if role == "assistant" else "input_text"
+                        converted_parts.append({"type": new_type, "text": part})
+                input_items.append({"role": role, "content": converted_parts})
+            else:
+                input_items.append({"role": role, "content": str(content)})
+
+        stream = body.get("stream", False)
+        payload = {
+            "model": model,
+            "store": False,
+            "stream": True,
+            "input": input_items
+        }
+        if body.get("tools"):
+            converted_tools = []
+            for tool in body["tools"]:
+                if isinstance(tool, dict):
+                    if tool.get("type") == "function" and "function" in tool:
+                        fn = tool["function"]
+                        c_tool = {
+                            "type": "function",
+                            "name": fn.get("name", ""),
+                            "description": fn.get("description", ""),
+                            "parameters": fn.get("parameters", {})
+                        }
+                        if "strict" in fn:
+                            c_tool["strict"] = fn["strict"]
+                        converted_tools.append(c_tool)
+                    else:
+                        converted_tools.append(tool)
+                else:
+                    converted_tools.append(tool)
+            payload["tools"] = converted_tools
+
+        if body.get("tool_choice"):
+            tc = body["tool_choice"]
+            if isinstance(tc, dict) and tc.get("type") == "function" and "function" in tc:
+                payload["tool_choice"] = {
+                    "type": "function",
+                    "name": tc["function"].get("name", "")
+                }
+            else:
+                payload["tool_choice"] = tc
+
+        async def stream_generator():
+            nonlocal auth_header
+            created_ts = int(time.time())
+            cmpl_id = f"chatcmpl-omnirush-{created_ts}"
+            has_tool_calls = False
+            done_sent = False
+            for attempt in range(2):
+                client = httpx.AsyncClient(timeout=60.0)
+                try:
+                    req = client.build_request(
+                        "POST",
+                        f"{target_base}/responses",
+                        headers={"Authorization": auth_header, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                        json=payload
+                    )
+                    upstream_resp = await client.send(req, stream=True)
+                    if upstream_resp.status_code == 401 and attempt == 0:
+                        await upstream_resp.aclose()
+                        await client.aclose()
+                        new_tok = await refresh_omnirush_token()
+                        if new_tok:
+                            auth_header = f"Bearer {new_tok}"
+                            continue
+                    if upstream_resp.status_code != 200:
+                        err_text = await upstream_resp.aread()
+                        await upstream_resp.aclose()
+                        await client.aclose()
+                        err_json = {"error": {"message": err_text.decode('utf-8', errors='ignore'), "type": "upstream_error", "code": upstream_resp.status_code}}
+                        yield f"data: {json.dumps(err_json)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    async for raw_line in upstream_resp.aiter_lines():
+                        line = raw_line.strip()
+                        if line.startswith("data: "):
+                            try:
+                                d = json.loads(line[6:].strip())
+                                t = d.get("type")
+                                if t == "response.output_text.delta":
+                                    delta_chunk = {
+                                        "id": cmpl_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created_ts,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {"content": d.get("delta", "")},
+                                                "finish_reason": None
+                                            }
+                                        ]
+                                    }
+                                    yield f"data: {json.dumps(delta_chunk)}\n\n"
+                                elif t == "response.output_item.added":
+                                    item = d.get("item", {})
+                                    if item.get("type") == "function_call":
+                                        has_tool_calls = True
+                                        tc_chunk = {
+                                            "id": cmpl_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created_ts,
+                                            "model": model,
+                                            "choices": [
+                                                {
+                                                    "index": 0,
+                                                    "delta": {
+                                                        "tool_calls": [
+                                                            {
+                                                                "index": d.get("output_index", 0),
+                                                                "id": item.get("call_id", f"call_{int(time.time()*1000)}"),
+                                                                "type": "function",
+                                                                "function": {
+                                                                    "name": item.get("name", ""),
+                                                                    "arguments": ""
+                                                                }
+                                                            }
+                                                        ]
+                                                    },
+                                                    "finish_reason": None
+                                                }
+                                            ]
+                                        }
+                                        yield f"data: {json.dumps(tc_chunk)}\n\n"
+                                elif t == "response.function_call_arguments.delta":
+                                    has_tool_calls = True
+                                    arg_chunk = {
+                                        "id": cmpl_id,
+                                        "object": "chat.completion.chunk",
+                                        "created": created_ts,
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {
+                                                    "tool_calls": [
+                                                        {
+                                                            "index": d.get("output_index", 0),
+                                                            "function": {
+                                                                "arguments": d.get("delta", "")
+                                                            }
+                                                        }
+                                                    ]
+                                                },
+                                                "finish_reason": None
+                                            }
+                                        ]
+                                    }
+                                    yield f"data: {json.dumps(arg_chunk)}\n\n"
+                                elif t == "response.completed":
+                                    if not done_sent:
+                                        done_sent = True
+                                        final_chunk = {
+                                            "id": cmpl_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created_ts,
+                                            "model": model,
+                                            "choices": [
+                                                {
+                                                    "index": 0,
+                                                    "delta": {},
+                                                    "finish_reason": "tool_calls" if has_tool_calls else "stop"
+                                                }
+                                            ]
+                                        }
+                                        yield f"data: {json.dumps(final_chunk)}\n\n"
+                                        yield "data: [DONE]\n\n"
+                            except Exception:
+                                pass
+
+                    if not done_sent:
+                        done_sent = True
+                        final_chunk = {
+                            "id": cmpl_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "tool_calls" if has_tool_calls else "stop"
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(final_chunk)}\n\n"
+                        yield "data: [DONE]\n\n"
+                    return
+                finally:
+                    await client.aclose()
+
+        if stream:
+            return StreamingResponse(stream_generator(), media_type="text/event-stream")
+        else:
+            full_text = ""
+            created_ts = int(time.time())
+            tool_calls = []
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{target_base}/responses",
+                    headers={"Authorization": auth_header, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                    json=payload
+                ) as upstream_resp:
+                    if upstream_resp.status_code != 200:
+                        err_text = await upstream_resp.aread()
+                        return JSONResponse(status_code=upstream_resp.status_code, content={"error": err_text.decode('utf-8', errors='ignore')})
+                    async for raw_line in upstream_resp.aiter_lines():
+                        line = raw_line.strip()
+                        if line.startswith("data: "):
+                            try:
+                                d = json.loads(line[6:].strip())
+                                t = d.get("type")
+                                if t == "response.output_text.delta":
+                                    full_text += d.get("delta", "")
+                                elif t == "response.output_item.added":
+                                    item = d.get("item", {})
+                                    if item.get("type") == "function_call":
+                                        tool_calls.append({
+                                            "id": item.get("call_id", f"call_{int(time.time()*1000)}"),
+                                            "type": "function",
+                                            "function": {
+                                                "name": item.get("name", ""),
+                                                "arguments": ""
+                                            }
+                                        })
+                                elif t == "response.function_call_arguments.delta":
+                                    idx = d.get("output_index", 0)
+                                    if idx < len(tool_calls):
+                                        tool_calls[idx]["function"]["arguments"] += d.get("delta", "")
+                            except Exception:
+                                pass
+
+            msg = {"role": "assistant"}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+                msg["content"] = full_text or None
+                finish_reason = "tool_calls"
+            else:
+                msg["content"] = full_text
+                finish_reason = "stop"
+
+            return JSONResponse({
+                "id": f"chatcmpl-omnirush-{created_ts}",
+                "object": "chat.completion",
+                "created": created_ts,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": msg,
+                        "finish_reason": finish_reason
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 15,
+                    "completion_tokens": len(full_text.split()),
+                    "total_tokens": 15 + len(full_text.split())
+                }
+            })
+
+    raise HTTPException(status_code=404, detail="Not Found")
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

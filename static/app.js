@@ -422,6 +422,7 @@ function updateHeroQuickBar() {
     Object.entries(appState.catalog).forEach(([name, data]) => {
       const opt = document.createElement('option');
       opt.value = name;
+      opt.disabled = data.enabled === false;
       const prov = detectProviderName(data.api_base);
       const isPri = name === primaryModel;
       opt.textContent = `${isPri ? '[#1] ' : ''}${name} (${prov})`;
@@ -443,6 +444,7 @@ function populateQuickSelectors() {
   entries.forEach(([name, data]) => {
     const opt = document.createElement('option');
     opt.value = name;
+    opt.disabled = data.enabled === false;
     const prov = detectProviderName(data.api_base);
     const isPri = name === currentPrimary;
     opt.textContent = `${isPri ? '[#1] ' : ''}${name} (${prov} — ${data.target_model || name})`;
@@ -692,8 +694,8 @@ async function savePipelineChanges() {
    Set primary model
    -------------------------------------------------------------------------- */
 async function setAsPrimaryModel(modelName) {
-  if (!appState.catalog[modelName]) {
-    showToast(`Model ${modelName} not found in catalog!`, 'error');
+  if (!appState.catalog[modelName] || appState.catalog[modelName].enabled === false) {
+    showToast(`Turn on ${modelName} before setting it as primary.`, 'error');
     return;
   }
 
@@ -810,8 +812,10 @@ function renderCatalog() {
     const inPipeline = pipelineIndex !== -1;
     const provider = detectProviderName(data.api_base);
     const toolSupported = isToolCallingSupported(name);
+    const enabled = data.enabled !== false;
 
-    card.className = `catalog-card ${isPrimary ? 'is-primary' : ''}`;
+    card.className = `catalog-card ${isPrimary ? 'is-primary' : ''} ${enabled ? '' : 'is-disabled'}`;
+    card.dataset.modelName = name;
 
     let statusBadgeHtml = '';
     if (isPrimary) {
@@ -831,7 +835,7 @@ function renderCatalog() {
         ? `<span class="tool-badge verified">${ICONS.wrench} Tool Calling</span>`
         : `<span class="tool-badge text-only">${ICONS.chat} Chat Only</span>`}
         </div>
-        ${statusBadgeHtml}
+        <div class="catalog-status">${statusBadgeHtml}<button class="model-toggle" type="button" role="switch" aria-label="${enabled ? 'Turn off' : 'Turn on'} ${escapeHtml(name)}" aria-checked="${enabled}" onclick="toggleCatalogModel(this)">${enabled ? 'ON' : 'OFF'}</button></div>
       </div>
 
       <div class="catalog-details">
@@ -844,19 +848,19 @@ function renderCatalog() {
       <div class="catalog-footer">
         <div id="catalog-ping-${escapeHtml(name)}" class="ping-result"></div>
         <div style="display: flex; gap: 0.4rem; flex-wrap: wrap;">
-          ${!isPrimary ? `
+          ${enabled && !isPrimary ? `
             <button class="btn btn-primary-action btn-sm" onclick="setAsPrimaryModel('${escapeHtml(name)}')">
               ${ICONS.star} Set as #1
             </button>
-          ` : `
+          ` : isPrimary ? `
             <span class="active-route-label">${ICONS.check} Active Route</span>
-          `}
-          ${!inPipeline ? `
+          ` : ''}
+          ${enabled && !inPipeline ? `
             <button class="btn btn-secondary btn-sm" onclick="addModelToPipeline('${escapeHtml(name)}')">
               + Fallback
             </button>
           ` : ''}
-          <button class="btn btn-secondary btn-sm" onclick="pingCatalogModel('${escapeHtml(name)}')">
+          <button class="btn btn-secondary btn-sm" onclick="pingCatalogModel('${escapeHtml(name)}')" ${enabled ? '' : 'disabled title="Turn on this model to ping it"'}>
             ${ICONS.zap} Ping
           </button>
           <button class="btn btn-secondary btn-sm" onclick="openEditModelModal('${escapeHtml(name)}')">
@@ -870,7 +874,36 @@ function renderCatalog() {
   });
 }
 
+async function toggleCatalogModel(button) {
+  const name = button.closest('.catalog-card').dataset.modelName;
+  const enabled = appState.catalog[name].enabled === false;
+  button.disabled = true;
+  button.textContent = '...';
+  try {
+    const res = await apiFetch('/api/config/model/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_name: name, enabled })
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.detail || 'Could not change model state');
+    }
+    await loadConfig();
+    await fetchStatus();
+    showToast(`${name} turned ${enabled ? 'on' : 'off'}${!enabled && appState.pipeline.length ? `. Primary: ${appState.pipeline[0]}` : ''}.`, 'success');
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = enabled ? 'OFF' : 'ON';
+    showToast(`Could not update ${name}: ${err.message}`, 'error');
+  }
+}
+
 function addModelToPipeline(modelName) {
+  if (appState.catalog[modelName]?.enabled === false) {
+    showToast(`Turn on ${modelName} before adding it to the pipeline.`, 'error');
+    return;
+  }
   if (!appState.pipeline.includes(modelName)) {
     appState.pipeline.push(modelName);
     renderPipeline();

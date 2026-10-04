@@ -4,6 +4,8 @@ litellm_config.yaml.bak
 dahl_litellm_config.yaml
 dahl_litellm_config.yaml.bak
 *.local.yaml
+*.models.local.json
+.omnirush_auth.json
 .env
 .env.*
 

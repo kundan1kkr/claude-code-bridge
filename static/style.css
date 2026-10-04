@@ -1006,6 +1006,14 @@ body {
   box-shadow: 0 0 24px -8px var(--accent-glow), var(--inset-highlight);
 }
 
+.catalog-card.is-disabled { opacity: 0.68; }
+.catalog-card.is-disabled:hover { transform: none; }
+.catalog-status { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; }
+.model-toggle { border: 1px solid var(--border-color); border-radius: var(--radius-full); background: var(--bg-raised); color: var(--text-muted); padding: 0.35rem 0.75rem; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; cursor: pointer; }
+.model-toggle[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.model-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.model-toggle:disabled { cursor: wait; opacity: 0.6; }
+
 .catalog-header {
   display: flex;
   align-items: flex-start;

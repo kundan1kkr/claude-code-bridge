@@ -11,7 +11,8 @@ if [ -f "$DIR/litellm_config.yaml" ]; then
 elif [ -f "$DIR/dahl_litellm_config.yaml" ]; then
     CONFIG_PATH="$DIR/dahl_litellm_config.yaml"
 elif [ -f "$DIR/litellm_config.example.yaml" ]; then
-    CONFIG_PATH="$DIR/litellm_config.example.yaml"
+    cp "$DIR/litellm_config.example.yaml" "$DIR/litellm_config.yaml"
+    CONFIG_PATH="$DIR/litellm_config.yaml"
 else
     CONFIG_PATH="$DIR/litellm_config.yaml"
 fi
@@ -78,7 +79,7 @@ start_services() {
         echo "ℹ️ LiteLLM Proxy is already running on port $PROXY_PORT."
     else
         echo "⏳ Launching LiteLLM Proxy (Port $PROXY_PORT)..."
-        "$PYTHON_BIN" "$DIR/start_proxy.py" --config "$CONFIG_PATH" --port $PROXY_PORT > "$PROXY_LOG" 2>&1 &
+        BRIDGE_CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" "$DIR/start_proxy.py" --config "$CONFIG_PATH" --port $PROXY_PORT > "$PROXY_LOG" 2>&1 &
         PROXY_PID=$!
         
         # Wait up to 6 seconds for proxy to become ready

@@ -1,4 +1,6 @@
 import os
+import json
+from pathlib import Path
 from datetime import datetime
 from litellm.integrations.custom_logger import CustomLogger
 
@@ -10,7 +12,14 @@ class StripImageHandler(CustomLogger):
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         if not data:
             return data
-            
+        config_path = Path(os.environ.get("BRIDGE_CONFIG_PATH", str(Path(__file__).resolve().parent / "dahl_litellm_config.yaml")))
+        state_path = config_path.with_suffix(".models.local.json")
+        if state_path.exists():
+            with open(state_path, encoding="utf-8") as f:
+                disabled = json.load(f).get("disabled", {})
+            if data.get("model") in disabled:
+                return f"Model '{data['model']}' is turned off"
+
         for k in ("prompt_cache_key", "prompt_cache", "cache_control", "anthropic_beta"):
             data.pop(k, None)
             

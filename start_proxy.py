@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys
 import os
+import json
+from pathlib import Path
 
 # Ensure local directory is on python path
 dir_path = os.path.dirname(os.path.abspath(__file__))
@@ -37,5 +39,20 @@ except Exception:
     pass
 
 if __name__ == "__main__":
+    config_arg = next((sys.argv[i + 1] for i, arg in enumerate(sys.argv[:-1]) if arg == "--config"), None)
+    config_path = Path(config_arg or os.environ.get("BRIDGE_CONFIG_PATH", str(Path(dir_path) / "dahl_litellm_config.yaml")))
+    os.environ["BRIDGE_CONFIG_PATH"] = str(config_path)
+    state_path = config_path.with_suffix(".models.local.json")
+    if state_path.exists():
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        import yaml
+        with open(config_path, encoding="utf-8") as f:
+            runtime = yaml.safe_load(f) or {}
+        active = {entry.get("model_name") for entry in runtime.get("model_list", [])
+                  if entry.get("model_name") not in state.get("disabled", {})
+                  and entry.get("model_name") not in {"*", "claude*", "default", "claude-opus-5-5", "claude-opus-4-6", "claude-opus-4-5-20250219", "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-sonnet", "claude-3-5-haiku-20241022", "claude-sonnet-4-6-alias"}}
+        if not active:
+            sys.exit("No enabled models. Turn on a model in the dashboard before starting the proxy.")
     from litellm import run_server
     sys.exit(run_server())
